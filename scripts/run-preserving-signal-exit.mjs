@@ -14,6 +14,7 @@ let forwardedSignal = null;
 const child = spawn(command, args, {
   env: process.env,
   stdio: 'inherit',
+  shell: process.platform === 'win32',
 });
 
 for (const signal of Object.keys(signalExitCodes)) {

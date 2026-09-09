@@ -49,7 +49,7 @@
     "test:runtime-interaction": "CAT_CAFE_DISABLE_SHARED_STATE_PREFLIGHT=1 bash ./scripts/with-test-home.sh node --import tsx --test --test-timeout=60000 test/runtime-interaction-service.test.ts test/runtime-interaction-routes.test.ts test/runtime-interaction-composition.test.ts test/runtime-interaction-card-publisher.test.ts test/codex-runtime-interaction-adapter.test.ts test/codex-runtime-interaction-wire-edge.test.ts test/approval-hub/f306-approval-adapter.test.ts test/codex-app-server-protocol-resilience.test.mjs",
     "persist-dormant-cursors": "pnpm run build && node scripts/persist-dormant-cursors.mjs",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
     "@cat-cafe/collective-connector": "workspace:*",
