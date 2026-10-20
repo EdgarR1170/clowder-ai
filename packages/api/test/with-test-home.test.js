@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const withTestHome = resolve(__dirname, '../scripts/with-test-home.sh');
+const withTestHome = resolve(__dirname, '../scripts/with-test-home.mjs');
 
 test('with-test-home isolates installer writes from inherited account roots and legacy HOME', () => {
   const outerRoot = mkdtempSync(join(tmpdir(), 'account-root-sentinel-'));
@@ -44,7 +44,7 @@ test('with-test-home isolates installer writes from inherited account roots and 
       const credentials = JSON.parse(readFileSync(join(process.env.HOME, '.cat-cafe/credentials.json'), 'utf8'));
       console.log(JSON.stringify({ ids: Object.keys(accounts), credentialIds: Object.keys(credentials) }));
     `;
-    const result = spawnSync('bash', [withTestHome, 'node', '-e', probe, installer], {
+    const result = spawnSync(process.execPath, [withTestHome, 'node', '-e', probe, installer], {
       cwd: resolve(__dirname, '..'),
       env: { ...process.env, HOME: outerHome, CAT_CAFE_GLOBAL_CONFIG_ROOT: outerRoot },
       encoding: 'utf8',
@@ -64,7 +64,7 @@ test('with-test-home isolates installer writes from inherited account roots and 
 
 test('with-test-home enables write guards despite inherited sandbox bypass flags', () => {
   const result = spawnSync(
-    'bash',
+    process.execPath,
     [
       withTestHome,
       'node',
@@ -82,7 +82,7 @@ test('with-test-home enables write guards despite inherited sandbox bypass flags
 });
 
 test('with-test-home forces NODE_ENV=test even when outer shell is production', () => {
-  const result = spawnSync('bash', [withTestHome, 'node', '-p', 'process.env.NODE_ENV'], {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', 'process.env.NODE_ENV'], {
     cwd: resolve(__dirname, '..'),
     env: {
       ...process.env,
@@ -96,7 +96,7 @@ test('with-test-home forces NODE_ENV=test even when outer shell is production', 
 });
 
 test('with-test-home strips runtime default cat override from outer shell', () => {
-  const result = spawnSync('bash', [withTestHome, 'node', '-p', 'process.env.DEFAULT_CAT_ID ?? ""'], {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', 'process.env.DEFAULT_CAT_ID ?? ""'], {
     cwd: resolve(__dirname, '..'),
     env: {
       ...process.env,
@@ -110,7 +110,7 @@ test('with-test-home strips runtime default cat override from outer shell', () =
 });
 
 test('with-test-home strips runtime API host binding from outer shell', () => {
-  const result = spawnSync('bash', [withTestHome, 'node', '-p', 'process.env.API_SERVER_HOST ?? ""'], {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', 'process.env.API_SERVER_HOST ?? ""'], {
     cwd: resolve(__dirname, '..'),
     env: {
       ...process.env,
@@ -124,7 +124,7 @@ test('with-test-home strips runtime API host binding from outer shell', () => {
 });
 
 test('with-test-home strips the runtime Codex carrier from outer shell', () => {
-  const result = spawnSync('bash', [withTestHome, 'node', '-p', 'process.env.CAT_CAFE_CODEX_CARRIER ?? ""'], {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', 'process.env.CAT_CAFE_CODEX_CARRIER ?? ""'], {
     cwd: resolve(__dirname, '..'),
     env: {
       ...process.env,
@@ -138,14 +138,18 @@ test('with-test-home strips the runtime Codex carrier from outer shell', () => {
 });
 
 test('with-test-home strips the runtime Claude carrier from outer shell', () => {
-  const result = spawnSync('bash', [withTestHome, 'node', '-p', 'process.env.CAT_CAFE_CLAUDE_CARRIER ?? ""'], {
-    cwd: resolve(__dirname, '..'),
-    env: {
-      ...process.env,
-      CAT_CAFE_CLAUDE_CARRIER: 'bg_daemon',
+  const result = spawnSync(
+    process.execPath,
+    [withTestHome, 'node', '-p', 'process.env.CAT_CAFE_CLAUDE_CARRIER ?? ""'],
+    {
+      cwd: resolve(__dirname, '..'),
+      env: {
+        ...process.env,
+        CAT_CAFE_CLAUDE_CARRIER: 'bg_daemon',
+      },
+      encoding: 'utf8',
     },
-    encoding: 'utf8',
-  });
+  );
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), '');
@@ -153,7 +157,7 @@ test('with-test-home strips the runtime Claude carrier from outer shell', () => 
 
 for (const field of ['CODEX_HOME', 'CODEX_SQLITE_HOME']) {
   test(`with-test-home strips inherited ${field} before account fixtures load`, () => {
-    const result = spawnSync('bash', [withTestHome, 'node', '-p', `process.env.${field} ?? ""`], {
+    const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', `process.env.${field} ?? ""`], {
       cwd: resolve(__dirname, '..'),
       env: { ...process.env, [field]: '/outer-owned-codex-fixture' },
       encoding: 'utf8',
@@ -174,7 +178,7 @@ test('with-test-home allows the child fixture to select its own Codex roots', ()
       marker: process.env.TEST_HOME_FIXTURE_MARKER,
     }));
   `;
-  const result = spawnSync('bash', [withTestHome, 'node', '-e', probe], {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-e', probe], {
     cwd: resolve(__dirname, '..'),
     env: {
       ...process.env,
@@ -203,7 +207,7 @@ test('with-test-home pins REDIS_URL when the outer shell has none', () => {
   delete outer.REDIS_URL;
   delete outer.CAT_CAFE_REDIS_TEST_ISOLATED;
 
-  const result = spawnSync('bash', [withTestHome, 'node', '-p', REDIS_URL_PROBE], {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', REDIS_URL_PROBE], {
     cwd: resolve(__dirname, '..'),
     env: outer,
     encoding: 'utf8',
@@ -214,7 +218,7 @@ test('with-test-home pins REDIS_URL when the outer shell has none', () => {
 });
 
 test('with-test-home overrides an inherited REDIS_URL instead of trusting it', () => {
-  const result = spawnSync('bash', [withTestHome, 'node', '-p', REDIS_URL_PROBE], {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', REDIS_URL_PROBE], {
     cwd: resolve(__dirname, '..'),
     env: {
       ...process.env,
@@ -229,7 +233,7 @@ test('with-test-home overrides an inherited REDIS_URL instead of trusting it', (
 });
 
 test('with-test-home rejects an isolated flag without a runner lease before executing the command', () => {
-  const result = spawnSync('bash', [withTestHome, 'node', '-p', REDIS_URL_PROBE], {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', REDIS_URL_PROBE], {
     env: {
       ...process.env,
       REDIS_URL: 'redis://127.0.0.1:6947/15',
@@ -245,7 +249,7 @@ test('with-test-home rejects an isolated flag without a runner lease before exec
 
 test('non-isolated sandbox clears inherited Redis paths and binds an unreachable endpoint', () => {
   const result = spawnSync(
-    'bash',
+    process.execPath,
     [
       withTestHome,
       'node',
@@ -269,4 +273,39 @@ test('non-isolated sandbox clears inherited Redis paths and binds an unreachable
   );
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), ['redis://127.0.0.1:0', null, null, null, null]);
+});
+
+test('with-test-home propagates the child exit code', () => {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-e', 'process.exit(7)'], {
+    cwd: resolve(__dirname, '..'),
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 7);
+});
+
+test('with-test-home removes the temporary HOME after the child exits', () => {
+  const result = spawnSync(process.execPath, [withTestHome, 'node', '-p', 'process.env.HOME'], {
+    cwd: resolve(__dirname, '..'),
+    env: { ...process.env, HOME: join(tmpdir(), 'outer-home-sentinel') },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const testHome = result.stdout.trim();
+  assert.ok(testHome);
+  assert.notEqual(testHome, join(tmpdir(), 'outer-home-sentinel'));
+  assert.equal(existsSync(testHome), false);
+});
+
+test('with-test-home forwards explicit --env assignments', () => {
+  const result = spawnSync(
+    process.execPath,
+    [withTestHome, '--env', 'WITH_TEST_HOME_FLAG=forwarded', 'node', '-p', 'process.env.WITH_TEST_HOME_FLAG'],
+    {
+      cwd: resolve(__dirname, '..'),
+      env: { ...process.env, WITH_TEST_HOME_FLAG: 'outer' },
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'forwarded');
 });

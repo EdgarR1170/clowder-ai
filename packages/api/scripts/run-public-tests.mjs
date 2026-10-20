@@ -1,0 +1,109 @@
+#!/usr/bin/env node
+import { spawn, spawnSync } from 'node:child_process';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// Windows CreateProcess limits the command line to 32767 characters, and cmd.exe
+// has a much smaller practical limit. Keep each child well below it; the
+// resolver can return more files than a single argv can carry.
+const MAX_ARGV_CHARS = 6000;
+
+function fail(message) {
+  console.error(`[run-public-tests] ${message}`);
+  process.exitCode = 1;
+}
+
+function resolveFiles() {
+  const resolver = spawnSync(process.execPath, [join(packageRoot, 'scripts', 'resolve-public-test-files.mjs')], {
+    cwd: packageRoot,
+    env: process.env,
+    encoding: 'utf8',
+  });
+  if (resolver.error) throw resolver.error;
+  if (resolver.status !== 0) {
+    throw new Error(`public-test resolver exited ${resolver.status}: ${resolver.stderr.trim() || 'no stderr'}`);
+  }
+  const files = resolver.stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (files.length === 0) {
+    throw new Error('public-test resolver returned an empty file set; refusing full-tree discovery');
+  }
+  return files;
+}
+
+function chunkFiles(files, baseArgs) {
+  const chunks = [];
+  const baseLength = baseArgs.reduce((length, arg) => length + arg.length + 1, 0);
+  let chunk = [];
+  let length = baseLength;
+  for (const file of files) {
+    const nextLength = length + file.length + 1;
+    if (chunk.length > 0 && nextLength > MAX_ARGV_CHARS) {
+      chunks.push(chunk);
+      chunk = [];
+      length = baseLength;
+    }
+    chunk.push(file);
+    length += file.length + 1;
+  }
+  if (chunk.length > 0) chunks.push(chunk);
+  return chunks;
+}
+
+function run(files) {
+  const baseArgs = [
+    '--import',
+    pathToFileURL(join(packageRoot, 'test', 'helpers', 'setup-cat-registry.js')).href,
+    '--test',
+    '--test-concurrency=1',
+  ];
+  const chunks = chunkFiles(files, baseArgs);
+
+  return (async () => {
+    for (const chunk of chunks) {
+      const outcome = await new Promise((resolveExit, reject) => {
+        const child = spawn(process.execPath, [...baseArgs, ...chunk], {
+          cwd: packageRoot,
+          env: process.env,
+          stdio: 'inherit',
+          windowsHide: true,
+        });
+        const forward = (signal) => {
+          if (child.exitCode !== null || child.signalCode !== null) return;
+          try {
+            child.kill(signal);
+          } catch {
+            // The child may already have exited between the check and the signal.
+          }
+        };
+        const onSigint = () => forward('SIGINT');
+        const onSigterm = () => forward('SIGTERM');
+        process.on('SIGINT', onSigint);
+        process.on('SIGTERM', onSigterm);
+        child.once('error', (error) => {
+          process.off('SIGINT', onSigint);
+          process.off('SIGTERM', onSigterm);
+          reject(error);
+        });
+        child.once('close', (code, signal) => {
+          process.off('SIGINT', onSigint);
+          process.off('SIGTERM', onSigterm);
+          resolveExit({ code, signal });
+        });
+      });
+      if (outcome.code !== 0 || outcome.signal) return outcome;
+    }
+    return { code: 0, signal: null };
+  })();
+}
+
+try {
+  const files = resolveFiles();
+  const outcome = await run(files);
+  process.exitCode = outcome.code ?? (outcome.signal ? 1 : 0);
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
