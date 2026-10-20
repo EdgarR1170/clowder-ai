@@ -1,13 +1,23 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { terminateChild } from '../scripts/with-test-home.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const withTestHome = resolve(__dirname, '../scripts/with-test-home.mjs');
+
+function run(args) {
+  return spawnSync(process.execPath, [withTestHome, ...args], {
+    cwd: resolve(__dirname, '..'),
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+}
 
 test('with-test-home isolates installer writes from inherited account roots and legacy HOME', () => {
   const outerRoot = mkdtempSync(join(tmpdir(), 'account-root-sentinel-'));
@@ -308,4 +318,43 @@ test('with-test-home forwards explicit --env assignments', () => {
   );
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), 'forwarded');
+});
+
+test('passes path arguments containing spaces unchanged', () => {
+  const output = run(['node', '-e', 'console.log(process.argv.slice(1).join("|"))', 'path with spaces/测试.test.js']);
+  assert.equal(output.status, 0, output.stderr);
+  assert.equal(output.stdout.trim(), 'path with spaces/测试.test.js');
+});
+
+test('terminateChild kills the direct child and its descendants', async () => {
+  const parent = spawn(
+    process.execPath,
+    [
+      '-e',
+      "const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});console.log(c.pid);setInterval(()=>{},1000);",
+    ],
+    {
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    },
+  );
+  const [chunk] = await once(parent.stdout, 'data');
+  const grandchildPid = Number(String(chunk).trim());
+  assert.ok(grandchildPid > 0, `expected grandchild pid, got ${chunk}`);
+  terminateChild(parent, 'SIGTERM');
+  await Promise.race([
+    once(parent, 'close'),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('parent did not exit')), 10_000)),
+  ]);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(grandchildPid, 0);
+    } catch (error) {
+      if (error.code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  assert.fail('grandchild process is still running');
 });

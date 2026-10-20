@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const isWindows = process.platform === 'win32';
@@ -99,6 +99,27 @@ function configureSandbox(env) {
   return testHome;
 }
 
+function terminateChild(child, signal) {
+  if (!child.pid) return;
+  if (isWindows) {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if (error?.code === 'ESRCH') return;
+    try {
+      child.kill(signal);
+    } catch {
+      // The child may already have exited between the check and the signal.
+    }
+  }
+}
+
 function runCommand(command, args, env) {
   return new Promise((resolveExit, reject) => {
     const child = spawn(command, args, {
@@ -106,15 +127,12 @@ function runCommand(command, args, env) {
       env,
       stdio: 'inherit',
       windowsHide: true,
+      detached: !isWindows,
     });
 
     const forward = (signal) => {
       if (child.exitCode !== null || child.signalCode !== null) return;
-      try {
-        child.kill(signal);
-      } catch {
-        // The child may already have exited between the check and the signal.
-      }
+      terminateChild(child, signal);
     };
     const onSigint = () => forward('SIGINT');
     const onSigterm = () => forward('SIGTERM');
@@ -158,7 +176,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  fail(error instanceof Error ? error.message : String(error));
-  console.error(usage());
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    fail(error instanceof Error ? error.message : String(error));
+    console.error(usage());
+  });
+}
+
+export { terminateChild };

@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const isWindows = process.platform === 'win32';
 // Windows CreateProcess limits the command line to 32767 characters, and cmd.exe
 // has a much smaller practical limit. Keep each child well below it; the
 // resolver can return more files than a single argv can carry.
@@ -14,8 +15,8 @@ function fail(message) {
   process.exitCode = 1;
 }
 
-function resolveFiles() {
-  const resolver = spawnSync(process.execPath, [join(packageRoot, 'scripts', 'resolve-public-test-files.mjs')], {
+function resolveFiles(resolverPath = join(packageRoot, 'scripts', 'resolve-public-test-files.mjs')) {
+  const resolver = spawnSync(process.execPath, [resolverPath], {
     cwd: packageRoot,
     env: process.env,
     encoding: 'utf8',
@@ -53,6 +54,27 @@ function chunkFiles(files, baseArgs) {
   return chunks;
 }
 
+function terminateChild(child, signal) {
+  if (!child.pid) return;
+  if (isWindows) {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if (error?.code === 'ESRCH') return;
+    try {
+      child.kill(signal);
+    } catch {
+      // The child may already have exited between the check and the signal.
+    }
+  }
+}
+
 function run(files) {
   const baseArgs = [
     '--import',
@@ -70,14 +92,11 @@ function run(files) {
           env: process.env,
           stdio: 'inherit',
           windowsHide: true,
+          detached: !isWindows,
         });
         const forward = (signal) => {
           if (child.exitCode !== null || child.signalCode !== null) return;
-          try {
-            child.kill(signal);
-          } catch {
-            // The child may already have exited between the check and the signal.
-          }
+          terminateChild(child, signal);
         };
         const onSigint = () => forward('SIGINT');
         const onSigterm = () => forward('SIGTERM');
@@ -100,10 +119,14 @@ function run(files) {
   })();
 }
 
-try {
-  const files = resolveFiles();
-  const outcome = await run(files);
-  process.exitCode = outcome.code ?? (outcome.signal ? 1 : 0);
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  try {
+    const files = resolveFiles();
+    const outcome = await run(files);
+    process.exitCode = outcome.code ?? (outcome.signal ? 1 : 0);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 }
+
+export { chunkFiles, resolveFiles };
