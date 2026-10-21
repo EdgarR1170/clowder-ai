@@ -144,6 +144,23 @@ test('copies a local directory into an immutable canonical archive before invent
   assert.equal((await store.snapshot()).instances.length, 1);
 });
 
+test('packages a local directory whose source path resembles pnpm .pnpm', async () => {
+  const root = await tempRoot('cat-cafe-local-pnpm-path-');
+  const sourceRoot = join(root, 'node_modules', '.pnpm', 'fixture@1.0.0', 'node_modules', 'fixture');
+  await writeLocalPackage(sourceRoot);
+  await writeFile(
+    join(sourceRoot, 'package.json'),
+    `${JSON.stringify({ name: '@clowder-ai/official-test-source', version: '1.0.0' })}\n`,
+    'utf8',
+  );
+  const { admission } = await harness();
+
+  const result = await admission.install({ kind: 'local-directory', path: sourceRoot });
+
+  assert.equal(result.pluginId, 'official.test-source');
+  assert.match(result.packageDigest, /^sha512-[A-Za-z0-9+/]{86}==$/);
+});
+
 test('quarantines a local package rejected by Host grant admission', async () => {
   const archive = await packageArchive();
   const archivePath = join(await tempRoot('cat-cafe-f202-local-invalid-grant-'), 'plugin.tgz');

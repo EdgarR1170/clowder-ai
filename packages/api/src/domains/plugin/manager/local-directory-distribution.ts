@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants, realpathSync } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { constants, existsSync, realpathSync } from 'node:fs';
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -43,13 +43,35 @@ function invalid(code: string, message: string): never {
 function hash(bytes: Buffer | string): string {
   return `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
 }
+function resolveNpmInvocation(npmBin: string): { command: string; prefixArgs: string[] } {
+  if (process.platform !== 'win32') return { command: npmBin, prefixArgs: [] };
+  const lower = npmBin.toLowerCase();
+  if (lower !== 'npm' && !lower.endsWith('.cmd')) return { command: npmBin, prefixArgs: [] };
+  // execFile cannot launch npm.cmd on Windows. Run npm's JS entrypoint with
+  // the same Node binary instead, preserving the caller's npm version.
+  const candidates = [
+    resolve(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    ...(isAbsolute(npmBin) ? [resolve(dirname(npmBin), 'node_modules', 'npm', 'bin', 'npm-cli.js')] : []),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return { command: process.execPath, prefixArgs: [candidate] };
+  }
+  return { command: npmBin, prefixArgs: [] };
+}
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
 function pathOf(root: string, member: string): string {
   if (
     !member ||
     isAbsolute(member) ||
     member.includes('\\') ||
     member.split('/').some((part) => !part || part === '.' || part === '..') ||
-    /[\x00-\x1f\x7f]/.test(member) ||
+    hasControlCharacter(member) ||
     Buffer.byteLength(member) > PLUGIN_ARCHIVE_BUDGET.pathBytes ||
     member.split('/').length > PLUGIN_ARCHIVE_BUDGET.pathDepth
   )
@@ -142,6 +164,20 @@ async function writeMember(
   await lifetime.io(() => utimes(destination, 0, 0));
 }
 
+async function copyForPack(sourceRoot: string, destination: string, lifetime: LocalDirectoryOperation): Promise<void> {
+  await lifetime.io(() => mkdir(destination, { recursive: true, mode: 0o700 }));
+  await lifetime.io(() =>
+    cp(sourceRoot, destination, {
+      recursive: true,
+      force: true,
+      errorOnExist: false,
+      // npm ignores node_modules for publication. Copying it is both expensive
+      // and, on Windows, can make npm pack choke on pnpm's .pnpm junctions.
+      filter: (source) => !relative(sourceRoot, source).split(sep).includes('node_modules'),
+    }),
+  );
+}
+
 function packResult(text: string): { files: { path: string; size: number }[]; filename?: string } {
   const result: unknown = JSON.parse(text);
   if (!Array.isArray(result) || result.length !== 1 || !result[0] || !Array.isArray(result[0].files)) {
@@ -166,6 +202,12 @@ function packResult(text: string): { files: { path: string; size: number }[]; fi
   }
   if (!names.has('package.json')) invalid('DEPENDENCY_PACK_FAILED', 'publication package.json is missing');
   return { files: files.sort((a, b) => a.path.localeCompare(b.path)), filename: result[0].filename };
+}
+
+function requiredNode(nodes: Map<string, Node>, root: string): Node {
+  const node = nodes.get(root);
+  if (!node) invalid('DEPENDENCY_PREPARATION_LIMIT', 'missing source node for publication');
+  return node;
 }
 
 /** Resolve the complete locked graph before invoking a packer or writing inventory. */
@@ -226,7 +268,7 @@ export async function prepareLocalDirectoryDistribution(
       LC_ALL: 'C',
       COPYFILE_DISABLE: '1',
     };
-    const run = (bin: string, args: string[]) =>
+    const runProcess = (bin: string, args: string[]) =>
       lifetime.io(() =>
         execFileAsync(bin, args, {
           cwd: operation,
@@ -236,7 +278,8 @@ export async function prepareLocalDirectoryDistribution(
           maxBuffer: 8 * 1024 * 1024,
         }),
       );
-    const npm = options.npmBin?.trim() || 'npm';
+    const npm = resolveNpmInvocation(options.npmBin?.trim() || 'npm');
+    const run = (args: string[]) => runProcess(npm.command, [...npm.prefixArgs, ...args]);
     const npmArgs = [
       '--ignore-scripts',
       '--offline',
@@ -249,14 +292,16 @@ export async function prepareLocalDirectoryDistribution(
       `--cache=${resolve(operation, 'cache')}`,
     ];
     const selectionBudget: Budget = { files: 0, bytes: 0 };
+    const packSources = new Map<number, string>();
     // Admission source defines content provenance. Lock SRI remains coordinate
     // metadata; every physical package is sealed as owner-local publication bytes.
     await source.assertCurrent();
-    const npmVersion = (await run(npm, ['--version', ...npmArgs])).stdout.trim();
+    const npmVersion = (await run(['--version', ...npmArgs])).stdout.trim();
     for (const node of nodes.values()) {
-      const selected = packResult(
-        (await run(npm, ['pack', '--dry-run', '--json', ...npmArgs, node.source.root])).stdout,
-      );
+      const packSource = resolve(operation, 'pack-sources', String(node.id));
+      packSources.set(node.id, packSource);
+      await copyForPack(node.source.root, packSource, lifetime);
+      const selected = packResult((await run(['pack', '--dry-run', '--json', ...npmArgs, packSource])).stdout);
       const snapshot = resolve(operation, `node-${node.id}`);
       const packDirectory = resolve(operation, 'packs', String(node.id));
       await lifetime.io(() => mkdir(snapshot, { mode: 0o700 }));
@@ -272,7 +317,7 @@ export async function prepareLocalDirectoryDistribution(
       // Pack only the private snapshot. Replacing or editing the source during
       // npm execution can no longer change the bytes given to the packer.
       const packed = packResult(
-        (await run(npm, ['pack', '--json', ...npmArgs, `--pack-destination=${packDirectory}`, snapshot])).stdout,
+        (await run(['pack', '--json', ...npmArgs, `--pack-destination=${packDirectory}`, snapshot])).stdout,
       );
       if (JSON.stringify(packed.files) !== JSON.stringify(selected.files)) {
         invalid('DEPENDENCY_SOURCE_CHANGED', 'sealed publication member selection differs');
@@ -310,8 +355,12 @@ export async function prepareLocalDirectoryDistribution(
     // enumeration order of root.dependencies. Cycles reuse an identical ancestor.
     for (let cursor = 0; cursor < pending.length; cursor++) {
       lifetime.step();
-      const destination = pending[cursor]!;
-      const node = nodes.get(mounted.get(destination)!)!;
+      const destination = pending[cursor];
+      if (!destination) invalid('DEPENDENCY_PREPARATION_LIMIT', 'missing relocated publication destination');
+      const mountedRoot = mounted.get(destination);
+      if (!mountedRoot) invalid('DEPENDENCY_PREPARATION_LIMIT', 'missing relocated publication root');
+      const node = nodes.get(mountedRoot);
+      if (!node) invalid('DEPENDENCY_PREPARATION_LIMIT', 'missing relocated publication node');
       for (const edge of node.source.dependencies.filter((edge) => !edge.peer)) {
         const ancestor = ancestorTarget(destination, edge.name);
         if (ancestor && mounted.get(ancestor) === edge.root) continue;
@@ -324,7 +373,7 @@ export async function prepareLocalDirectoryDistribution(
       }
     }
     for (const [destination, root] of mounted) {
-      const node = nodes.get(root)!;
+      const node = requiredNode(nodes, root);
       for (const edge of node.source.dependencies) {
         const target = ancestorTarget(destination, edge.name);
         if (!target || mounted.get(target) !== edge.root)
@@ -345,7 +394,8 @@ export async function prepareLocalDirectoryDistribution(
       await lifetime.io(() => mkdir(destination, { recursive: true, mode: 0o700 }));
       for (const member of node.members) {
         count(outputBudget, member.size);
-        const sealed = await memberBytes(node.snapshot!, member.path, lifetime);
+        if (!node.snapshot) invalid('DEPENDENCY_PREPARATION_LIMIT', 'missing private publication snapshot');
+        const sealed = await memberBytes(node.snapshot, member.path, lifetime);
         if (JSON.stringify(sealed.metadata) !== JSON.stringify(member))
           invalid('DEPENDENCY_SOURCE_CHANGED', 'private publication snapshot changed');
         await writeMember(destination, member, sealed.bytes, lifetime);
@@ -361,8 +411,10 @@ export async function prepareLocalDirectoryDistribution(
         if (JSON.stringify(current.metadata) !== JSON.stringify(member))
           invalid('DEPENDENCY_SOURCE_CHANGED', 'source publication content changed');
       }
+      const finalPackSource = packSources.get(node.id);
+      if (!finalPackSource) invalid('DEPENDENCY_PREPARATION_LIMIT', 'missing pack source for publication node');
       const finalSelection = packResult(
-        (await run(npm, ['pack', '--dry-run', '--json', ...npmArgs, node.source.root])).stdout,
+        (await run(['pack', '--dry-run', '--json', ...npmArgs, finalPackSource])).stdout,
       );
       if (
         JSON.stringify(finalSelection.files) !== JSON.stringify(node.members.map(({ path, size }) => ({ path, size })))
@@ -394,12 +446,12 @@ export async function prepareLocalDirectoryDistribution(
           requested: edge.requested,
           coordinate: edge.lockCoordinate,
           peer: edge.peer,
-          target: nodes.get(edge.root)!.id,
+          target: requiredNode(nodes, edge.root).id,
         })),
       })),
       topology: [...mounted].map(([path, root]) => ({
         path: relative(preparedRoot, path).split(sep).join('/') || '.',
-        node: nodes.get(root)!.id,
+        node: requiredNode(nodes, root).id,
       })),
     };
     const receiptBytes = Buffer.from(
@@ -419,7 +471,9 @@ export async function prepareLocalDirectoryDistribution(
     }
     await normalizeDirectories(preparedRoot);
     const archive = resolve(operation, 'candidate.tgz');
-    await run(options.tarBin?.trim() || 'tar', ['-czf', archive, '-C', operation, 'package']);
+    // Keep the archive operand free of a Windows drive colon. GNU tar can
+    // parse `D:\...` as a remote host; cwd is the Host-owned staging root.
+    await runProcess(options.tarBin?.trim() || 'tar', ['-czf', 'candidate.tgz', '-C', '.', 'package']);
     await preflightPluginArchive(archive, signal);
     lifetime.check();
     candidate = await lifetime.io(() => readFile(archive));
