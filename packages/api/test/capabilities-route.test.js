@@ -21,6 +21,8 @@ import {
 } from '../dist/config/capabilities/capability-orchestrator.js';
 import { writeMountRules } from '../dist/config/mount/mount-rules-store.js';
 
+const providerDirectory = (provider) => (provider === 'kimi' ? '.kimi-code' : `.${provider}`);
+
 const AUTH_HEADERS = { 'x-cat-cafe-user': 'test-user' };
 const OWNER_SESSION_HEADERS = { 'x-test-session-user': 'you' };
 const NON_OWNER_SESSION_HEADERS = { 'x-test-session-user': 'codex' };
@@ -58,8 +60,8 @@ describe('scanProviderSkillDirs', () => {
   it('merges multi-source provider results deterministically', async () => {
     const { scanProviderSkillDirs } = await import('../dist/routes/capabilities.js');
     const root = join(process.cwd(), '.test-tmp-cap-scan-' + Date.now());
-    const kimiProject = join(root, '.kimi', 'skills');
-    const kimiUser = join(root, 'home', '.kimi', 'skills');
+    const kimiProject = join(root, '.kimi-code', 'skills');
+    const kimiUser = join(root, 'home', '.kimi-code', 'skills');
     await mkdir(join(kimiProject, 'alpha'), { recursive: true });
     await mkdir(join(kimiUser, 'beta'), { recursive: true });
     await Promise.all([
@@ -83,7 +85,7 @@ describe('scanProviderSkillDirs', () => {
   it('preserves null scan sentinels for failed project scans', async () => {
     const { scanProviderSkillDirs } = await import('../dist/routes/capabilities.js');
     const root = join(process.cwd(), '.test-tmp-cap-scan-fail-' + Date.now());
-    const kimiUser = join(root, 'home', '.kimi', 'skills');
+    const kimiUser = join(root, 'home', '.kimi-code', 'skills');
     await mkdir(join(kimiUser, 'beta'), { recursive: true });
     await writeFile(join(kimiUser, 'beta', 'SKILL.md'), '# beta');
     try {
@@ -985,14 +987,14 @@ describe('GET /api/capabilities (Fastify)', () => {
       mkdir(join(projectDir, '.claude'), { recursive: true }),
       mkdir(join(projectDir, '.codex'), { recursive: true }),
       mkdir(join(projectDir, '.gemini'), { recursive: true }),
-      mkdir(join(projectDir, '.kimi'), { recursive: true }),
+      mkdir(join(projectDir, '.kimi-code'), { recursive: true }),
       mkdir(homeDir, { recursive: true }),
     ]);
     await Promise.all([
       symlink(sourceSkillsDir, join(projectDir, '.claude', 'skills')),
       symlink(sourceSkillsDir, join(projectDir, '.codex', 'skills')),
       symlink(sourceSkillsDir, join(projectDir, '.gemini', 'skills')),
-      symlink(sourceSkillsDir, join(projectDir, '.kimi', 'skills')),
+      symlink(sourceSkillsDir, join(projectDir, '.kimi-code', 'skills')),
     ]);
     await writeCapabilitiesConfig(projectDir, { version: 1, capabilities: [] });
 
@@ -1057,7 +1059,7 @@ describe('GET /api/capabilities (Fastify)', () => {
         claude: { enabled: true, path: '.project-claude/skills' },
         codex: { enabled: false, path: '.codex/skills' },
         gemini: { enabled: false, path: '.gemini/skills' },
-        kimi: { enabled: false, path: '.kimi/skills' },
+        kimi: { enabled: false, path: '.kimi-code/skills' },
       },
       customPaths: [],
     });
@@ -1120,7 +1122,7 @@ describe('GET /api/capabilities (Fastify)', () => {
       mkdir(join(projectDir, '.claude/skills'), { recursive: true }),
       mkdir(join(projectDir, '.codex/skills'), { recursive: true }),
       mkdir(join(projectDir, '.gemini/skills'), { recursive: true }),
-      mkdir(join(projectDir, '.kimi/skills'), { recursive: true }),
+      mkdir(join(projectDir, '.kimi-code/skills'), { recursive: true }),
       mkdir(homeDir, { recursive: true }),
       writeCapabilitiesConfig(projectDir, {
         version: 2,
@@ -1136,7 +1138,7 @@ describe('GET /api/capabilities (Fastify)', () => {
     for (const provider of ['claude', 'codex', 'gemini']) {
       await Promise.all(
         sourceSkillNames.map((name) =>
-          symlink(join(sourceSkillsDir, name), join(projectDir, `.${provider}/skills`, name)),
+          symlink(join(sourceSkillsDir, name), join(projectDir, `${providerDirectory(provider)}/skills`, name)),
         ),
       );
     }
@@ -1189,7 +1191,7 @@ describe('GET /api/capabilities (Fastify)', () => {
     await mkdir(skillSourceDir, { recursive: true });
     await writeFile(join(skillSourceDir, 'SKILL.md'), '# Project Local Source Skill\n');
     for (const provider of ['claude', 'codex', 'gemini', 'kimi']) {
-      const skillsDir = join(projectDir, `.${provider}`, 'skills');
+      const skillsDir = join(projectDir, providerDirectory(provider), 'skills');
       const linkPath = join(skillsDir, skillName);
       await mkdir(skillsDir, { recursive: true });
       await symlink(relative(dirname(linkPath), skillSourceDir), linkPath);
@@ -1263,7 +1265,7 @@ describe('GET /api/capabilities (Fastify)', () => {
       mkdir(join(projectDir, '.claude/skills'), { recursive: true }),
       mkdir(join(projectDir, '.codex/skills'), { recursive: true }),
       mkdir(join(projectDir, '.gemini/skills'), { recursive: true }),
-      mkdir(join(projectDir, '.kimi/skills'), { recursive: true }),
+      mkdir(join(projectDir, '.kimi-code/skills'), { recursive: true }),
       mkdir(homeDir, { recursive: true }),
       writeCapabilitiesConfig(projectDir, {
         version: 2,
@@ -1338,7 +1340,7 @@ describe('GET /api/capabilities (Fastify)', () => {
           { name: 'claude', path: '.claude/skills', enabled: false },
           { name: 'codex', path: '.codex/skills', enabled: false },
           { name: 'gemini', path: '.gemini/skills', enabled: false },
-          { name: 'kimi', path: '.kimi/skills', enabled: false },
+          { name: 'kimi', path: '.kimi-code/skills', enabled: false },
           { name: 'acp', path: customSkillsDir, enabled: true },
         ],
       }),
@@ -1431,7 +1433,7 @@ describe('GET /api/capabilities (Fastify)', () => {
         claude: { enabled: true, path: '.claude/skills' },
         codex: { enabled: false, path: '.codex/skills' },
         gemini: { enabled: false, path: '.gemini/skills' },
-        kimi: { enabled: false, path: '.kimi/skills' },
+        kimi: { enabled: false, path: '.kimi-code/skills' },
       },
       customPaths: [],
     });
@@ -2127,7 +2129,7 @@ describe('GET /api/capabilities (Fastify)', () => {
         claude: { enabled: true, path: '.claude/skills' },
         codex: { enabled: true, path: '.codex/skills' },
         gemini: { enabled: true, path: '.gemini/skills' },
-        kimi: { enabled: true, path: '.kimi/skills' },
+        kimi: { enabled: true, path: '.kimi-code/skills' },
       },
       customPaths: [{ alias: 'acp-client', path: '.acp/skills' }],
     });
@@ -2491,7 +2493,7 @@ describe('GET /api/capabilities (Fastify)', () => {
     }
   });
 
-  it('extracts skill metadata from project-level .kimi/skills SKILL.md', async () => {
+  it('extracts skill metadata from project-level .kimi-code/skills SKILL.md', async () => {
     const Fastify = (await import('fastify')).default;
     const { capabilitiesRoutes } = await import('../dist/routes/capabilities.js');
 
@@ -2500,7 +2502,7 @@ describe('GET /api/capabilities (Fastify)', () => {
     await app.ready();
 
     const projectDir = join('/tmp', `cap-kimi-project-meta-${Date.now()}`);
-    const kimiSkillsDir = join(projectDir, '.kimi', 'skills');
+    const kimiSkillsDir = join(projectDir, '.kimi-code', 'skills');
     await mkdir(join(kimiSkillsDir, 'test-skill'), { recursive: true });
 
     // Write SKILL.md with frontmatter containing description and triggers
@@ -2536,12 +2538,12 @@ describe('GET /api/capabilities (Fastify)', () => {
       assert.equal(
         skillItem.description,
         'Test skill for project-level Kimi metadata extraction',
-        'Should extract description from project .kimi/skills SKILL.md',
+        'Should extract description from project .kimi-code/skills SKILL.md',
       );
       assert.deepEqual(
         skillItem.triggers,
         ['test-trigger', 'kimi-test'],
-        'Should extract triggers from project .kimi/skills SKILL.md',
+        'Should extract triggers from project .kimi-code/skills SKILL.md',
       );
     } finally {
       await rm(projectDir, { recursive: true, force: true });
@@ -2821,7 +2823,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       const res = await patchSkillCapability(app, projectDir, skillId, true, 'project');
 
       assert.equal(res.statusCode, 200, res.payload);
-      for (const provider of ['.claude', '.codex', '.gemini', '.kimi']) {
+      for (const provider of ['.claude', '.codex', '.gemini', '.kimi-code']) {
         const linkPath = join(projectDir, provider, 'skills', skillId);
         const stat = await lstat(linkPath);
         assert.equal(stat.isSymbolicLink(), true, `${provider} skill path should be a symlink`);
@@ -2974,7 +2976,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       assert.equal(skill?.globalEnabled, false, 'project enable must NOT change globalEnabled');
       assert.deepEqual(skill?.mountPaths, ['claude', 'codex', 'gemini', 'kimi']);
       // Non-conflicting providers ARE mounted
-      for (const provider of ['.claude', '.gemini', '.kimi']) {
+      for (const provider of ['.claude', '.gemini', '.kimi-code']) {
         const linkPath = join(projectDir, provider, 'skills', skillId);
         assert.equal(
           (await lstat(linkPath)).isSymbolicLink(),
@@ -3087,7 +3089,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       // siblingSkill must remain disabled — must NOT have symlinks
       const sibling = config?.capabilities.find((c) => c.id === siblingSkill);
       assert.deepEqual(sibling?.mountPaths, [], 'disabled sibling must keep empty mountPaths');
-      for (const mp of ['.claude', '.codex', '.gemini', '.kimi']) {
+      for (const mp of ['.claude', '.codex', '.gemini', '.kimi-code']) {
         const linkPath = join(projectDir, mp, 'skills', siblingSkill);
         assert.equal(existsSync(linkPath), false, `${mp} symlink for disabled sibling must not exist`);
       }
@@ -3152,7 +3154,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
 
       // No symlinks for either skill
       for (const id of skills) {
-        for (const mp of ['.claude', '.codex', '.gemini', '.kimi']) {
+        for (const mp of ['.claude', '.codex', '.gemini', '.kimi-code']) {
           const linkPath = join(projectDir, mp, 'skills', id);
           assert.equal(existsSync(linkPath), false, `${mp}/${id} symlink must not exist`);
         }
@@ -3537,7 +3539,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
         { name: 'claude', path: '.claude/skills', enabled: true },
         { name: 'codex', path: '.codex/skills', enabled: true },
         { name: 'gemini', path: '.gemini/skills', enabled: false },
-        { name: 'kimi', path: '.kimi/skills', enabled: false },
+        { name: 'kimi', path: '.kimi-code/skills', enabled: false },
       ],
     });
     const app = await buildSessionAppWithProjectRoot(mainRoot);
@@ -3601,7 +3603,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
         { name: 'claude', path: '.claude/skills', enabled: true },
         { name: 'codex', path: '.codex/skills', enabled: true },
         { name: 'gemini', path: '.gemini/skills', enabled: false },
-        { name: 'kimi', path: '.kimi/skills', enabled: false },
+        { name: 'kimi', path: '.kimi-code/skills', enabled: false },
       ],
     });
     const app = await buildSessionAppWithProjectRoot(mainRoot);
@@ -3966,7 +3968,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
         claude: { enabled: false, path: '.claude/skills' },
         codex: { enabled: false, path: '.codex/skills' },
         gemini: { enabled: false, path: '.gemini/skills' },
-        kimi: { enabled: false, path: '.kimi/skills' },
+        kimi: { enabled: false, path: '.kimi-code/skills' },
       },
       customPaths: [{ alias: 'acp', path: customSkillsDir }],
     });
@@ -4033,7 +4035,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
         { name: 'claude', path: '.claude/skills', enabled: true },
         { name: 'codex', path: '.codex/skills', enabled: true },
         { name: 'gemini', path: '.gemini/skills', enabled: false },
-        { name: 'kimi', path: '.kimi/skills', enabled: false },
+        { name: 'kimi', path: '.kimi-code/skills', enabled: false },
       ],
     });
     const app = await buildSessionApp();
@@ -4087,7 +4089,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
         { name: 'claude', path: '.claude/skills', enabled: true },
         { name: 'codex', path: '.codex/skills', enabled: false },
         { name: 'gemini', path: '.gemini/skills', enabled: false },
-        { name: 'kimi', path: '.kimi/skills', enabled: false },
+        { name: 'kimi', path: '.kimi-code/skills', enabled: false },
       ],
     });
 
@@ -4346,7 +4348,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
         claude: { enabled: true, path: '.claude/skills' },
         codex: { enabled: false, path: '.codex/skills' },
         gemini: { enabled: false, path: '.gemini/skills' },
-        kimi: { enabled: false, path: '.kimi/skills' },
+        kimi: { enabled: false, path: '.kimi-code/skills' },
       },
       customPaths: [],
     });
@@ -4535,7 +4537,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       );
       for (const provider of ['claude', 'codex', 'gemini', 'kimi']) {
         await assert.rejects(
-          () => lstat(join(projectDir, `.${provider}/skills/debugging`)),
+          () => lstat(join(projectDir, `${providerDirectory(provider)}/skills/debugging`)),
           /ENOENT/,
           `${provider} mount should be rolled back`,
         );

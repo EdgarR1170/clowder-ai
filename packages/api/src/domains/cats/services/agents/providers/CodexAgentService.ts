@@ -1,6 +1,7 @@
 import type { RuntimeProviderProfile } from '../../../../../config/account-resolver.js';
 import { finalizeCodexAccountEnvironment } from '../../../../../config/codex-account-environment.js';
 import { resolveCodexAccountLaunch, resolveCodexApiExecutionHome } from '../../../../../config/codex-account-launch.js';
+import { codexCliConfig } from '../../../../../config/codex-launch-config.js';
 import { codexManagedLaunchArgs } from '../../../../../config/codex-managed-launch.js';
 import { assertCodexManagedPlatformSupport } from '../../../../../config/codex-managed-support.js';
 import { assertCodexSharedStateRoots } from '../../../../../config/codex-shared-state.js';
@@ -16,6 +17,7 @@ import { CODEX_DESKTOP_ISOLATION_ARGS, CODEX_RESTRICTED_APPS_ARGS } from './code
 
 export { codexConfigObjectFromArgs } from './codex-config-overrides.js';
 
+import { buildCodexModelCatalogArgs, isCodexCustomCatalogModel } from './codex-model-catalog.js';
 import { extractUserEnvTemplates, hasSupportedEnvTemplate, resolveEnvMap } from './env-map.js';
 /**
  * Codex Agent Service
@@ -590,20 +592,31 @@ const CODEX_SIGNATURE_BOUNDARY_INSTRUCTION =
 
 /** Build the structured Codex reasoning-effort config argument. */
 export function buildCodexReasoningArgs(effortLevel: string): string[] {
-  return ['--config', `model_reasoning_effort=${toTomlString(effortLevel)}`];
+  return effortLevel ? ['--config', `model_reasoning_effort=${toTomlString(effortLevel)}`] : [];
+}
+
+/**
+ * Capability metadata needs a non-empty model family even when a native Codex
+ * member intentionally inherits the local CLI model (represented as empty).
+ * This projection never changes launch arguments or persisted member config.
+ */
+export function resolveCodexSchemaModelFamily(model: string | null | undefined): string {
+  return model?.trim() || 'unknown';
 }
 
 /**
  * `--config` keys whose values are part of a system-owned runtime contract.
  * Free-form cliConfigArgs may override ordinary Codex preferences, but they
- * cannot replace identity/speed controls or the model/window that an
- * invocation_config binding certifies as applied before launch.
+ * cannot replace identity/speed controls, the model/window an
+ * invocation_config binding certifies as applied before launch, or the
+ * custom-model metadata catalog injected for routed models.
  */
 const RESERVED_SYSTEM_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'developer_instructions',
   'service_tier',
   'model',
   'model_context_window',
+  'model_catalog_json',
   'model_auto_compact_token_limit',
 ]);
 
@@ -648,6 +661,27 @@ function parseCodexConfigArg(
 function configKey(expression: string): string {
   const equalsIndex = expression.indexOf('=');
   return (equalsIndex === -1 ? expression : expression.slice(0, equalsIndex)).trim();
+}
+
+/**
+ * Mirrors Codex's final `tools.update_plan.enabled` resolution for this
+ * invocation. The CLI applies every accepted `-c/--config` assignment in
+ * order, so a later duplicate leaf wins and a later parent-table assignment
+ * replaces the whole subtree (including dropping `update_plan`). Reuse the
+ * same dotted-path/TOML parser as the launch-config projection instead of
+ * scanning for the first matching leaf.
+ */
+function isCodexUpdatePlanEnabled(args: readonly string[]): boolean {
+  try {
+    const config = codexCliConfig(args);
+    const tools = config.tools;
+    if (!isCodexConfigObject(tools)) return false;
+    const updatePlan = tools.update_plan;
+    if (!isCodexConfigObject(updatePlan)) return false;
+    return updatePlan.enabled === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Parse every documented/accepted spelling of Codex's model value flag. */
@@ -1658,23 +1692,22 @@ export class CodexAgentService implements AgentService {
           };
     /** exec_json can only carry frozen bytes; undefined means "preflight, app_server only". */
     const execStdinInput = effectivePromptSource.kind === 'frozen' ? effectivePromptSource.prompt : undefined;
-    const effectiveModel = options?.callbackEnv?.CAT_CAFE_OPENAI_MODEL_OVERRIDE ?? this.model;
-    const imagePaths = await extractTrustedImagePaths(
-      options?.contentBlocks,
-      options?.uploadDir,
-      options?.resolveTrustedImagePath,
-    );
+    const nativeTool = catRegistry.tryGet(this.catId)?.config.configurationSource === 'native_tool';
+    const effectiveModel =
+      options?.callbackEnv?.CAT_CAFE_OPENAI_MODEL_OVERRIDE ?? (nativeTool ? getCatModel(this.catId) : this.model);
+    const imagePaths = native
+      ? []
+      : await extractTrustedImagePaths(options?.contentBlocks, options?.uploadDir, options?.resolveTrustedImagePath);
     const imageArgs = imagePaths.flatMap((path) => ['--image', path]);
 
     const sandboxMode = readOnly || live || native ? 'read-only' : getCodexSandboxMode();
     const approvalPolicy = readOnly || live || native ? 'never' : getCodexApprovalPolicy();
     const inheritedEffort = getCatEffort(this.catId as string, undefined, 'openai', effectiveModel);
-    const effortLevel = resolveCliEffortOverride(
-      'openai',
-      effectiveModel,
-      inheritedEffort,
-      options?.reasoningEffortOverride,
-    ).effective;
+    const effortLevel =
+      nativeTool && !inheritedEffort && !options?.reasoningEffortOverride
+        ? ''
+        : resolveCliEffortOverride('openai', effectiveModel, inheritedEffort, options?.reasoningEffortOverride)
+            .effective;
     const reasoningArgs = buildCodexReasoningArgs(effortLevel);
     const sandboxConfigArgs = ['--config', `sandbox_mode=${toTomlString(sandboxMode)}`];
     const approvalArgs = ['--config', `approval_policy="${approvalPolicy}"`];
@@ -1769,7 +1802,24 @@ export class CodexAgentService implements AgentService {
         userFlagSet.add(userConfigArgs[i]);
       }
     }
-    const authMode = options?.codexAccountLaunch?.authMode ?? getCodexAuthMode(options?.callbackEnv);
+    // Custom-model metadata: a model without a built-in Codex catalog entry
+    // (e.g. deepseek-flash) gets our catalog file so the CLI stops falling
+    // back to generic metadata. Gated per-model because the flag replaces
+    // the entire built-in catalog. The window is bound to THIS invocation's
+    // resolved native window (#1381) rather than a module-wide constant, and
+    // the instructions template is adapted to the tools this invocation
+    // actually exposes because Codex skips its own filter once a catalog is
+    // present.
+    const modelCatalogArgs = buildCodexModelCatalogArgs(effectiveModel, {
+      carrier: carrierMode,
+      nativeContextWindowTokens: nativeWindowTokens,
+      updatePlanEnabled: isCodexUpdatePlanEnabled(userConfigArgs),
+    });
+    const catalogRequested = carrierMode === 'exec_json' && isCodexCustomCatalogModel(effectiveModel);
+    const catalogApplied = modelCatalogArgs.length > 0;
+    const authMode =
+      options?.codexAccountLaunch?.authMode ??
+      (nativeTool && !options?.callbackEnv?.CODEX_AUTH_MODE ? 'auto' : getCodexAuthMode(options?.callbackEnv));
     const requestedServiceTier = resolveCodexSpeed({
       clientId: 'openai',
       authType: authMode === 'oauth' || authMode === 'api_key' ? authMode : undefined,
@@ -1824,11 +1874,11 @@ export class CodexAgentService implements AgentService {
       servedModelObservation === 'on';
     const oauthTransport = getCodexOAuthTransport();
     const builtinOpenaiProviderArgs: string[] =
-      !customBaseUrl && authMode === 'oauth' && oauthTransport === 'builtin'
+      !nativeTool && !customBaseUrl && authMode === 'oauth' && oauthTransport === 'builtin'
         ? ['--config', 'model_provider="openai"']
         : [];
     const openaiHttpsProviderArgs: string[] =
-      !customBaseUrl && authMode === 'oauth' && oauthTransport === 'https'
+      !nativeTool && !customBaseUrl && authMode === 'oauth' && oauthTransport === 'https'
         ? [
             '--config',
             'model_provider="openai_https"',
@@ -1915,23 +1965,16 @@ export class CodexAgentService implements AgentService {
       : options?.routeIntent && options.sessionId
         ? 'default'
         : null;
-    const collaborationMode =
-      collaborationModeKind && cliModel
-        ? {
-            mode: collaborationModeKind,
-            settings: {
-              model: cliModel,
-              reasoning_effort: effortLevel,
-              developer_instructions: developerInstructions,
-            },
-          }
-        : undefined;
-    if (carrierMode === 'app_server' && collaborationModeKind && !cliModel) {
-      log.warn(
-        { catId: this.catId, collaborationMode: collaborationModeKind },
-        'F306 route cannot set Codex collaboration mode without a selected model',
-      );
-    }
+    const collaborationMode = collaborationModeKind
+      ? {
+          mode: collaborationModeKind,
+          settings: {
+            model: cliModel,
+            ...(effortLevel ? { reasoning_effort: effortLevel } : {}),
+            developer_instructions: developerInstructions,
+          },
+        }
+      : undefined;
     const developerInstructionsArgs = ['--config', `developer_instructions=${toTomlString(developerInstructions)}`];
     const appsWriteApprovalArgs = readOnly || live || native ? [] : [...CODEX_APPS_WRITE_APPROVAL_ARGS];
     const desktopIsolationArgs = [
@@ -1983,6 +2026,7 @@ export class CodexAgentService implements AgentService {
           ...dedup(modelArgs),
           ...dedup(reasoningArgs),
           ...dedup(contextWindowArgs),
+          ...dedup(modelCatalogArgs),
           ...dedup(sandboxConfigArgs),
           ...dedup(approvalArgs),
           ...dedup(appsWriteApprovalArgs),
@@ -2005,6 +2049,7 @@ export class CodexAgentService implements AgentService {
           ...dedup(modelArgs),
           ...dedup(reasoningArgs),
           ...dedup(contextWindowArgs),
+          ...dedup(modelCatalogArgs),
           ...['--sandbox', sandboxMode],
           ...(readOnly || native ? [] : ['--add-dir', '.git']),
           ...dedup(approvalArgs),
@@ -2029,6 +2074,7 @@ export class CodexAgentService implements AgentService {
             ...dedup(modelArgs),
             ...dedup(reasoningArgs),
             ...dedup(contextWindowArgs),
+            ...dedup(modelCatalogArgs),
             ...dedup(appsWriteApprovalArgs),
             ...dedup(providerArgs),
             ...userConfigArgs,
@@ -2114,7 +2160,9 @@ export class CodexAgentService implements AgentService {
         }
       }
       const homeIsolated = !!native || (authMode === 'api_key' && !!customBaseUrl);
-      const codexEnv = native ? { ...native.env } : withVerdictGhGuardEnv(applyAuthMode(rawEnv, authMode));
+      const codexEnv = native
+        ? { ...native.env }
+        : withVerdictGhGuardEnv(nativeTool ? rawEnv : applyAuthMode(rawEnv, authMode));
 
       // Diagnostic logging: critical env state for debugging CLI startup failures
       log.info(
@@ -2213,6 +2261,11 @@ export class CodexAgentService implements AgentService {
           cwd: options?.workingDirectory ?? null,
           authMode,
           argCount: args.length,
+          // Distinguish "builtin model / app_server (not applicable)" from
+          // "custom model requested the catalog but materialization fell back".
+          modelCatalog: catalogApplied ? 'applied' : catalogRequested ? 'fallback' : 'not_applicable',
+          requestedContextWindow: contextWindow ?? null,
+          catalogContextWindow: catalogApplied && nativeWindowTokens != null ? nativeWindowTokens : null,
           // Log flag names + --config keys (no values) for debugging
           cliFlags: args.filter((a) => a.startsWith('-')),
           cliConfigKeys: args.map((a, i) => (args[i - 1] === '--config' ? a.split('=')[0] : null)).filter(Boolean),
@@ -2263,7 +2316,7 @@ export class CodexAgentService implements AgentService {
         command: codexCommand,
         provider: 'openai',
         carrier: useAppServer ? 'app_server' : 'exec_json',
-        modelFamily: cliModel ?? 'provider-default',
+        modelFamily: resolveCodexSchemaModelFamily(cliModel),
         profileClass: schemaDeliveryProfile,
         profileId: schemaDeliveryProfileId,
         config: createMcpSchemaDeliveryLaunchConfig({
@@ -2296,7 +2349,7 @@ export class CodexAgentService implements AgentService {
             carrier,
             ...(cliModel ? { model: cliModel } : {}),
             protocol: carrier === 'app_server' ? 'json_rpc' : 'exec_json',
-            reasoningEffort: effortLevel,
+            reasoningEffort: effortLevel || undefined,
             ...(requestedServiceTier ? { serviceTier: requestedServiceTier } : {}),
             ...(contextWindow ? { contextWindowTokens: contextWindow } : {}),
             ...(readOnly ? { toolExecutionPolicy: 'read_only' as const } : {}),

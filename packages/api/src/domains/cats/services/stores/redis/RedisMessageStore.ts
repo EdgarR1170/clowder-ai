@@ -858,6 +858,11 @@ redis.call('HSET', KEYS[1], 'lifecycle', ARGV[2])
 return 1
 `;
 
+const RELEASE_LIFECYCLE_DISPATCH_LOCK_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end
+return 0
+`;
+
 const CAS_LIFECYCLE_APPEND_ADMISSION_LUA = `
 for index = 1, #KEYS do
   if redis.call('EXISTS', KEYS[index]) == 0 then return -1 end
@@ -3951,8 +3956,46 @@ export class RedisMessageStore {
     id: string,
     patch: LifecycleInputDispatchPatch,
   ): Promise<AdvanceLifecycleInputDispatchResult> {
+    const locked = await this.withLifecycleDispatchLock(id, () =>
+      this.advanceLifecycleInputDispatchUnlocked(id, patch),
+    );
+    if (locked !== null) return locked;
+    const message = await this.getById(id);
+    if (!message) return { kind: 'not_found' };
+    return { kind: 'conflict', reason: 'contended', message };
+  }
+
+  /**
+   * Serialize dispatchRef writes for one source message. A fan-out delivers the
+   * same input to several cats at once; without this mutex every target races
+   * the same read-modify-write CAS and the last writer can lose all retries.
+   * The lock is only an optimizer: the CAS below still guarantees correctness
+   * if a lock expires or is lost.
+   */
+  private async withLifecycleDispatchLock<T>(id: string, run: () => Promise<T>): Promise<T | null> {
+    const key = MessageKeys.lifecycleDispatchLock(id);
+    const token = randomUUID();
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const acquired = await this.redis.set(key, token, 'PX', 2000, 'NX');
+      if (acquired === 'OK') {
+        try {
+          return await run();
+        } finally {
+          await this.redis.eval(RELEASE_LIFECYCLE_DISPATCH_LOCK_LUA, 1, key, token).catch(() => 0);
+        }
+      }
+      if (Date.now() >= deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, 2 + Math.floor(Math.random() * 3)));
+    }
+  }
+
+  private async advanceLifecycleInputDispatchUnlocked(
+    id: string,
+    patch: LifecycleInputDispatchPatch,
+  ): Promise<AdvanceLifecycleInputDispatchResult> {
     const key = MessageKeys.detail(id);
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 8; attempt++) {
       const raw = await this.redis.hget(key, 'lifecycle');
       const current = raw ? safeParseLifecycleMetadata(raw) : undefined;
       const message = await this.getById(id);
@@ -3974,7 +4017,7 @@ export class RedisMessageStore {
     }
     const message = await this.getById(id);
     if (!message) return { kind: 'not_found' };
-    return { kind: 'conflict', reason: 'identity_mismatch', message };
+    return { kind: 'conflict', reason: 'contended', message };
   }
 
   async commitLifecycleAppendAdmission(

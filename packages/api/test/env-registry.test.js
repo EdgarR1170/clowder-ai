@@ -95,10 +95,14 @@ describe('env-registry', () => {
     assert.equal(def.hubVisible, false);
   });
 
-  it('registers KIMI_CONFIG_FILE as bootstrap-only kimi config', () => {
-    const def = ENV_VARS.find((v) => v.name === 'KIMI_CONFIG_FILE');
-    assert.ok(def, 'KIMI_CONFIG_FILE should be in registry');
+  it('registers only native KIMI_CODE_HOME as bootstrap-only kimi config', () => {
+    const def = ENV_VARS.find((v) => v.name === 'KIMI_CODE_HOME');
+    assert.ok(def, 'KIMI_CODE_HOME should be in registry');
     assert.equal(def.category, 'kimi');
+    assert.equal(
+      ENV_VARS.some((entry) => ['KIMI_SHARE_DIR', 'KIMI_CONFIG_FILE'].includes(entry.name)),
+      false,
+    );
     assert.equal(def.runtimeEditable, false);
     assert.equal(def.hubVisible, false);
   });

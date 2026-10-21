@@ -40,6 +40,7 @@ import {
   requireLocalCapabilityWriteRequest,
   resolveCapabilityWriteSessionUserId,
 } from '../config/capabilities/capability-write-guards.js';
+import { resolveInvokeCapabilityRoot } from '../config/capabilities/invoke-capability-root.js';
 import { allowsImplicitCapabilityWrites } from '../config/capabilities/startup-cli-config.js';
 import { GovernanceRegistry } from '../config/governance/governance-registry.js';
 import { validateSkillName } from '../config/governance/skill-sync.js';
@@ -53,11 +54,8 @@ import { readCapabilitySnapshot } from '../domains/capabilities/capability-read-
 import { syncMcpAll } from '../mcp/mcp-sync-all.js';
 import { syncAll } from '../skills/skill-sync-all.js';
 import { type MountConflict, syncProject } from '../skills/skill-sync-engine.js';
-import {
-  redirectRuntimeProjectPath,
-  resolvePersistentProjectPath,
-  validateExternalProjectPathDetailed,
-} from '../utils/persistent-project-path.js';
+import { resolveKimiRuntimePaths } from '../utils/kimi-cli-runtime.js';
+import { resolvePersistentProjectPath, validateExternalProjectPathDetailed } from '../utils/persistent-project-path.js';
 import { pathsEqual } from '../utils/project-path.js';
 import { resolveUserId } from '../utils/request-identity.js';
 import { resolveMainRepoPath } from '../utils/skill-mount.js';
@@ -235,7 +233,7 @@ function getDiscoveryPaths(projectRoot: string) {
     claudeConfig: join(projectRoot, '.mcp.json'),
     codexConfig: join(projectRoot, '.codex', 'config.toml'),
     geminiConfig: join(projectRoot, '.gemini', 'settings.json'),
-    kimiConfig: join(projectRoot, '.kimi', 'mcp.json'),
+    kimiConfig: join(projectRoot, '.kimi-code', 'mcp.json'),
     antigravityConfig: join(homedir(), '.gemini', 'antigravity', 'mcp_config.json'),
   };
 }
@@ -250,7 +248,7 @@ function getCliConfigPaths(projectRoot: string) {
 // ────────── Route Plugin ──────────
 
 export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
-  const persistentProjectRoot = await redirectRuntimeProjectPath(PROJECT_ROOT);
+  const persistentProjectRoot = await resolveInvokeCapabilityRoot(PROJECT_ROOT);
   if (!persistentProjectRoot) throw new Error('Unable to resolve persistent global capabilities root');
   const getProjectRoot = (): string => persistentProjectRoot;
 
@@ -382,7 +380,7 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
           claudeConfig: join(home, '.claude', 'mcp.json'),
           codexConfig: join(home, '.codex', 'config.toml'),
           geminiConfig: join(home, '.gemini', 'settings.json'),
-          kimiConfig: join(home, '.kimi', 'mcp.json'),
+          kimiConfig: join(resolveKimiRuntimePaths(process.env, home).shareDir, 'mcp.json'),
           antigravityConfig: join(home, '.gemini', 'antigravity', 'mcp_config.json'),
         };
         const [projectTagged, userTagged] = await Promise.all([

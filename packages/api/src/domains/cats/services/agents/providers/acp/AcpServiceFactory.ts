@@ -12,6 +12,7 @@ import { resolveBoundAccountRefForCat } from '../../../../../../config/cat-accou
 import type { AcpVariantConfig } from '../../../../../../config/cat-config-loader.js';
 import { resolveContextCapacity } from '../../../../../../config/context-capacity.js';
 import { resolveEffectiveOpenCodeModel } from '../../../../../../config/opencode-model.js';
+import { saveSpan } from '../../../../../../utils/member-save-diagnostics.js';
 import type { AgentRegistrationFailure } from '../../registry/AgentServiceUnavailableError.js';
 import { prepareOpenCodeAcpSpawnConfig } from '../opencode-acp-spawn-config.js';
 import { AcpAgentService } from './AcpAgentService.js';
@@ -110,6 +111,7 @@ function resolveAcpBootstrap(
 }
 
 function resolveAcpAccount(projectRoot: string, config: CatConfig): AcpAccountContext {
+  if (config.configurationSource === 'native_tool' && !config.accountRef) return { account: null };
   const catId = config.id;
   const accountRef = resolveBoundAccountRefForCat(projectRoot, catId, config);
   const builtinClient = resolveBuiltinClientForProvider(config.clientId);
@@ -150,7 +152,7 @@ async function prepareAcpSpawnContext(
     // kimi-code's ACP server creates sessions through the same KimiCLI.create()
     // path as the CLI. KIMI_MODEL_MAX_CONTEXT_SIZE is its supported model-window
     // override, so keep the member policy process-scoped instead of mutating the
-    // user's shared ~/.kimi/config.toml.
+    // user's shared ~/.kimi-code/config.toml.
     acpSpawnEnv = {
       ...(acpSpawnEnv ?? {}),
       KIMI_MODEL_MAX_CONTEXT_SIZE: String(contextPolicy.windowTokens),
@@ -302,9 +304,9 @@ export async function createAcpServiceForConfig(
       );
     }
   }
-  const spawn = await prepareAcpSpawnContext(effectiveInput, bootstrap, accountContext);
+  const spawn = await saveSpan('acp.prepare', () => prepareAcpSpawnContext(effectiveInput, bootstrap, accountContext));
   if (!spawn) return null;
-  const pool = await ensureAcpPool(effectiveInput, bootstrap, spawn);
+  const pool = await saveSpan('acp.pool', () => ensureAcpPool(effectiveInput, bootstrap, spawn));
 
   // #712 P1-1: pass whitelist — MCP resolution happens at invoke time in
   // AcpAgentService so capability toggles take effect without registry rebuild.

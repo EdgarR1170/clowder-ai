@@ -16,7 +16,7 @@ describe('#1208 invocation-owned capacity snapshot', () => {
   let CodexAgentService;
   let savedConfigs;
 
-  function registerTestCat(contextWindow, defaultModel = 'gpt-5.4') {
+  function registerTestCat(contextWindow, defaultModel = 'gpt-5.4', overrides = {}) {
     catRegistry.reset();
     catRegistry.register(TEST_CAT_ID, {
       id: TEST_CAT_ID,
@@ -33,6 +33,7 @@ describe('#1208 invocation-owned capacity snapshot', () => {
       mcpSupport: false,
       roleDescription: 'test',
       personality: 'test',
+      ...overrides,
     });
   }
 
@@ -226,6 +227,28 @@ describe('#1208 invocation-owned capacity snapshot', () => {
       assert.equal(snapshot.model, 'gpt-5.3');
       assert.equal(snapshot.capacity.source, 'catalog');
       assert.equal(snapshot.capacity.windowTokens, 128_000);
+    } finally {
+      if (previous === undefined) delete process.env[envKey];
+      else process.env[envKey] = previous;
+    }
+  });
+
+  it('keeps a native_tool member window bound to its configured default model', async () => {
+    registerTestCat(1_000_000, 'deepseek-flash', { configurationSource: 'native_tool' });
+    const envKey = 'CAT_CAPACITY_OWNER_TEST_MODEL';
+    const previous = process.env[envKey];
+    process.env[envKey] = 'gpt-5.3';
+
+    try {
+      const snapshot = await resolveInvocationCapacitySnapshot({
+        catId: TEST_CAT_ID,
+        service: service(),
+      });
+
+      assert.equal(snapshot.model, 'deepseek-flash');
+      assert.equal(snapshot.capacity.source, 'manual');
+      assert.equal(snapshot.capacity.windowTokens, 1_000_000);
+      assert.equal(snapshot.nativeWindowTokens, 1_000_000);
     } finally {
       if (previous === undefined) delete process.env[envKey];
       else process.env[envKey] = previous;

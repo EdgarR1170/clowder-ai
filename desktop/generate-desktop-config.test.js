@@ -59,7 +59,11 @@ test('desktop distributions include the API that owns plugin installation', () =
   assert.match(ps1, /Copy-ToStaging \(Join-Path \$deployRoot "api"\)\s+"packages\\api"/);
   const iss = readFileSync(path.join(INSTALLER_DIR, 'cat-cafe.iss'), 'utf8');
   assert.match(iss, /Source:.*deploy-api\.tar\.gz/);
-  assert.match(iss, /Parameters:.*deploy-api\.tar\.gz.*packages\\api/);
+  // The branch extracts archives through the packaged extractor (integrity +
+  // progress) instead of a literal tar Parameters line.
+  assert.match(iss, /AfterInstall: ExtractRuntimeArchive\('deploy-api\.tar\.gz'\)/);
+  const extractor = readFileSync(path.join(SCRIPTS_DIR, 'extract-runtime-archive.cjs'), 'utf8');
+  assert.match(extractor, /'deploy-api': \['packages\/api'/);
 });
 
 test('desktop distributions do not bundle retired Host business-plugin sources', () => {

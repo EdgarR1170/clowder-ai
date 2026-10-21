@@ -253,6 +253,8 @@ export interface StoredToolEvent {
   type: 'tool_use' | 'tool_result';
   label: string;
   detail?: string;
+  /** Finalized call input carried by a result; replaces provisional use detail without adding a call. */
+  inputDetail?: string;
   timestamp: number;
   /** F153 Phase J AC-J7: native provider tool id, used to pair tool_use ↔ tool_result
    *  and to key the synthesized span on hydrate. Set by provider transformer via
@@ -1021,7 +1023,13 @@ export type AdvanceLifecycleInputDispatchResult =
   | { kind: 'applied' | 'replayed'; message: StoredMessage }
   | {
       kind: 'conflict';
-      reason: 'not_input' | 'identity_mismatch' | 'invalid_transition' | 'status_message_mismatch' | 'duplicate_target';
+      reason:
+        | 'not_input'
+        | 'identity_mismatch'
+        | 'invalid_transition'
+        | 'status_message_mismatch'
+        | 'duplicate_target'
+        | 'contended';
       message: StoredMessage;
     }
   | { kind: 'not_found' };
