@@ -296,6 +296,74 @@ test('bounds pack source copies before an ignored large cache is duplicated', as
   );
 });
 
+test('applies the pack source budget across every package in the dependency graph', async () => {
+  const workspace = await tempRoot('cat-cafe-local-shared-budget-');
+  const sourceRoot = join(workspace, 'packages', 'plugin');
+  const dependencyRoot = join(workspace, 'packages', 'runtime');
+  await writeLocalPackage(sourceRoot);
+  await writeLocalPackage(dependencyRoot);
+  await writeFile(
+    join(sourceRoot, 'package.json'),
+    `${JSON.stringify({
+      name: '@clowder-ai/official-test-source',
+      version: '1.0.0',
+      dependencies: { 'runtime-dependency': '1.0.0' },
+    })}\n`,
+    'utf8',
+  );
+  await writeFile(
+    join(dependencyRoot, 'package.json'),
+    `${JSON.stringify({ name: 'runtime-dependency', version: '1.0.0' })}\n`,
+    'utf8',
+  );
+  await writeFile(join(workspace, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n", 'utf8');
+  await writeFile(
+    join(workspace, 'pnpm-lock.yaml'),
+    `lockfileVersion: '9.0'
+
+importers:
+  .: {}
+  packages/plugin:
+    dependencies:
+      runtime-dependency:
+        specifier: 1.0.0
+        version: link:../runtime
+  packages/runtime: {}
+
+packages: {}
+snapshots: {}
+`,
+    'utf8',
+  );
+  await mkdir(join(sourceRoot, 'node_modules'), { recursive: true });
+  await symlink(
+    dependencyRoot,
+    join(sourceRoot, 'node_modules', 'runtime-dependency'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  for (const root of [sourceRoot, dependencyRoot]) {
+    await writeFile(join(root, '.npmignore'), 'cache\n', 'utf8');
+    await mkdir(join(root, 'cache'));
+    const handle = await open(join(root, 'cache/ignored.bin'), 'w');
+    try {
+      await handle.truncate(40 * 1024 * 1024);
+    } finally {
+      await handle.close();
+    }
+  }
+  const { admission, packagesRoot, store } = await harness();
+
+  await assert.rejects(
+    admission.install({ kind: 'local-directory', path: sourceRoot }),
+    (error) => error.code === 'INVALID_LOCAL_SOURCE' && error.cause?.code === 'DEPENDENCY_PREPARATION_LIMIT',
+  );
+  assert.deepEqual((await store.snapshot()).instances, []);
+  assert.equal(
+    (await readdir(packagesRoot)).some((entry) => entry.startsWith('.directory-prepare-')),
+    false,
+  );
+});
+
 test('cancels an in-flight pack source copy and releases its staging directory', async () => {
   const sourceRoot = await tempRoot('cat-cafe-local-copy-cancel-');
   await writeLocalPackage(sourceRoot);

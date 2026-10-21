@@ -242,9 +242,9 @@ async function copyForPack(
   sourceRoot: string,
   destination: string,
   lifetime: LocalDirectoryOperation,
+  budget: Budget,
 ): Promise<PackSourceManifest> {
   await lifetime.io(() => mkdir(destination, { recursive: true, mode: 0o700 }));
-  const budget: Budget = { files: 0, bytes: 0 };
   const manifest: PackSourceManifest = new Map();
   await walkPackSource(sourceRoot, lifetime, async (member, stat) => {
     if (stat.size > PLUGIN_ARCHIVE_BUDGET.singleFileBytes) {
@@ -424,6 +424,10 @@ export async function prepareLocalDirectoryDistribution(
       `--cache=${resolve(operation, 'cache')}`,
     ];
     const selectionBudget: Budget = { files: 0, bytes: 0 };
+    // Copy budgets are operation-scoped: every pack-sources/<id> view stays
+    // alive until this operation's finally block, so per-node budgets would
+    // multiply the disk/I/O allowance by the dependency-graph size.
+    const packCopyBudget: Budget = { files: 0, bytes: 0 };
     const packSources = new Map<number, string>();
     const packSourceManifests = new Map<number, PackSourceManifest>();
     // Admission source defines content provenance. Lock SRI remains coordinate
@@ -433,7 +437,7 @@ export async function prepareLocalDirectoryDistribution(
     for (const node of nodes.values()) {
       const packSource = resolve(operation, 'pack-sources', String(node.id));
       packSources.set(node.id, packSource);
-      packSourceManifests.set(node.id, await copyForPack(node.source.root, packSource, lifetime));
+      packSourceManifests.set(node.id, await copyForPack(node.source.root, packSource, lifetime, packCopyBudget));
       const selected = packResult((await run(['pack', '--dry-run', '--json', ...npmArgs, packSource])).stdout);
       const snapshot = resolve(operation, `node-${node.id}`);
       const packDirectory = resolve(operation, 'packs', String(node.id));
