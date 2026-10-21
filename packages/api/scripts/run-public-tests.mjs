@@ -79,7 +79,7 @@ function terminateChild(child, signal) {
   }
 }
 
-function run(files) {
+function run(files, options = {}) {
   const baseArgs = [
     '--import',
     pathToFileURL(join(packageRoot, 'test', 'helpers', 'setup-cat-registry.js')).href,
@@ -91,7 +91,7 @@ function run(files) {
   return (async () => {
     for (const chunk of chunks) {
       const outcome = await new Promise((resolveExit, reject) => {
-        const childEnv = { ...process.env, REDIS_URL: PUBLIC_TEST_REDIS_URL };
+        const childEnv = { ...(options.env ?? process.env), REDIS_URL: PUBLIC_TEST_REDIS_URL };
         // A nested node --test invocation must not inherit the outer test
         // runner's child marker, or Node treats the fixture as an IPC child.
         delete childEnv.NODE_TEST_CONTEXT;

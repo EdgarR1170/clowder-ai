@@ -12,6 +12,26 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = resolve(__dirname, '../package.json');
 const runPublicTestsPath = resolve(__dirname, '../scripts/run-public-tests.mjs');
 const resolverPath = resolve(__dirname, '../scripts/resolve-public-test-files.mjs');
+const REDIS_NAMESPACE_PRELOAD = 'redis-test-db-namespace.mjs';
+
+/**
+ * The fixture is generated after the official Redis runner signed its manifest.
+ * It cannot be in that manifest, so it must run in an explicit non-Redis child
+ * context even when this test itself is selected by `test:redis`.
+ */
+function withoutRedisRunnerEnv(base = process.env) {
+  const env = { ...base };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('CAT_CAFE_REDIS_TEST_')) delete env[key];
+  }
+  if (env.NODE_OPTIONS) {
+    env.NODE_OPTIONS = env.NODE_OPTIONS.split(/\s+/)
+      .filter((token) => !token.includes(REDIS_NAMESPACE_PRELOAD))
+      .join(' ');
+    if (!env.NODE_OPTIONS) delete env.NODE_OPTIONS;
+  }
+  return env;
+}
 
 test('test:public delegates to the Node public runner and keeps shard wiring', () => {
   const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
@@ -52,8 +72,13 @@ test('serial public lane overrides a legal isolated runner URL before executing 
     fixture,
     `import { test } from 'node:test';
      import { writeFileSync } from 'node:fs';
-     test('record REDIS_URL', () => {
-       writeFileSync(process.env.PUBLIC_REDIS_PROBE_OUT, process.env.REDIS_URL ?? '');
+     test('record child isolation', () => {
+       writeFileSync(process.env.PUBLIC_REDIS_PROBE_OUT, JSON.stringify({
+         redis: process.env.REDIS_URL ?? '',
+         isolated: process.env.CAT_CAFE_REDIS_TEST_ISOLATED ?? null,
+         manifest: process.env.CAT_CAFE_REDIS_TEST_DB_MANIFEST ?? null,
+         nodeOptions: process.env.NODE_OPTIONS ?? '',
+       }));
      });`,
   );
 
@@ -62,9 +87,13 @@ test('serial public lane overrides a legal isolated runner URL before executing 
   process.env.PUBLIC_REDIS_PROBE_OUT = output;
   process.env.REDIS_URL = 'redis://127.0.0.1:6921/2867';
   try {
-    const outcome = await run([fixture]);
+    const outcome = await run([fixture], { env: withoutRedisRunnerEnv() });
     assert.equal(outcome.code, 0, `public runner exited ${outcome.code}`);
-    assert.equal(readFileSync(output, 'utf8'), PUBLIC_TEST_DENY_REDIS_URL);
+    const observed = JSON.parse(readFileSync(output, 'utf8'));
+    assert.equal(observed.redis, PUBLIC_TEST_DENY_REDIS_URL);
+    assert.equal(observed.isolated, null);
+    assert.equal(observed.manifest, null);
+    assert.doesNotMatch(observed.nodeOptions, /redis-test-db-namespace\.mjs/);
   } finally {
     if (previousProbe === undefined) delete process.env.PUBLIC_REDIS_PROBE_OUT;
     else process.env.PUBLIC_REDIS_PROBE_OUT = previousProbe;
