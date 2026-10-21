@@ -7,6 +7,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const isWindows = process.platform === 'win32';
+const SUBTREE_POLL_MS = 50;
+const NORMAL_SUBTREE_GRACE_MS = 1000;
+const CANCEL_SUBTREE_GRACE_MS = 1500;
+const CANCEL_SUBTREE_WAIT_MS = 5000;
+
+const sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 
 const CLEARED_ENV_KEYS = [
   'CAT_CAFE_GLOBAL_CONFIG_ROOT',
@@ -120,6 +126,52 @@ function terminateChild(child, signal) {
   }
 }
 
+function processGroupExists(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the group exists but is not signalable by this process.
+    return error?.code !== 'ESRCH';
+  }
+}
+
+async function waitForProcessGroup(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processGroupExists(pid)) return true;
+    await sleep(SUBTREE_POLL_MS);
+  }
+  return !processGroupExists(pid);
+}
+
+async function settleSubtree(child, canceledSignal) {
+  if (!child.pid) return true;
+
+  // taskkill /T /F is synchronous and kills the Windows process tree. There is
+  // no portable job-object wait here, so the direct child's close is the
+  // strongest confirmation this wrapper can obtain on Windows.
+  if (isWindows) return true;
+
+  const grace = canceledSignal ? CANCEL_SUBTREE_GRACE_MS : NORMAL_SUBTREE_GRACE_MS;
+  if (await waitForProcessGroup(child.pid, grace)) return true;
+
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch (error) {
+    if (error?.code !== 'ESRCH') {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // The group may have exited between the check and the signal.
+      }
+    }
+  }
+
+  return waitForProcessGroup(child.pid, CANCEL_SUBTREE_WAIT_MS);
+}
+
 function runCommand(command, args, env) {
   return new Promise((resolveExit, reject) => {
     const child = spawn(command, args, {
@@ -130,7 +182,9 @@ function runCommand(command, args, env) {
       detached: !isWindows,
     });
 
+    let canceledSignal = null;
     const forward = (signal) => {
+      canceledSignal ??= signal;
       if (child.exitCode !== null || child.signalCode !== null) return;
       terminateChild(child, signal);
     };
@@ -145,9 +199,20 @@ function runCommand(command, args, env) {
       reject(error);
     });
     child.once('close', (code, signal) => {
-      process.off('SIGINT', onSigint);
-      process.off('SIGTERM', onSigterm);
-      resolveExit({ code, signal });
+      // Keep the signal handlers installed while the descendants finish.
+      // Otherwise a second Ctrl-C during the grace period would use Node's
+      // default exit path and let the exit hook delete HOME under them.
+      settleSubtree(child, canceledSignal)
+        .then((subtreeExited) => {
+          process.off('SIGINT', onSigint);
+          process.off('SIGTERM', onSigterm);
+          resolveExit({ code, signal, subtreeExited });
+        })
+        .catch((error) => {
+          process.off('SIGINT', onSigint);
+          process.off('SIGTERM', onSigterm);
+          reject(error);
+        });
     });
   });
 }
@@ -156,8 +221,9 @@ async function main() {
   const { env, command, args } = parseArgs(process.argv.slice(2));
   const testHome = configureSandbox(env);
   let cleaned = false;
+  let cleanupAllowed = true;
   const cleanup = () => {
-    if (cleaned) return;
+    if (cleaned || !cleanupAllowed) return;
     cleaned = true;
     try {
       rmSync(testHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -169,6 +235,12 @@ async function main() {
 
   try {
     const outcome = await runCommand(command, args, env);
+    cleanupAllowed = outcome.subtreeExited;
+    if (!outcome.subtreeExited) {
+      console.error(`[with-test-home] retained ${testHome}: descendant processes are still running`);
+      process.exitCode = 1;
+      return;
+    }
     cleanup();
     process.exitCode = outcome.code ?? (outcome.signal ? 1 : 0);
   } finally {

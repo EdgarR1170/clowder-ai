@@ -9,6 +9,10 @@ const isWindows = process.platform === 'win32';
 // has a much smaller practical limit. Keep each child well below it; the
 // resolver can return more files than a single argv can carry.
 const MAX_ARGV_CHARS = 6000;
+// The serial public lane must never inherit a legal isolated Redis runner's
+// endpoint. This mirrors run-public-tests.sh's REDIS_URL=redis://127.0.0.1:0
+// boundary and keeps public tests from touching a shared Redis by accident.
+const PUBLIC_TEST_REDIS_URL = 'redis://127.0.0.1:0';
 
 function fail(message) {
   console.error(`[run-public-tests] ${message}`);
@@ -87,9 +91,13 @@ function run(files) {
   return (async () => {
     for (const chunk of chunks) {
       const outcome = await new Promise((resolveExit, reject) => {
+        const childEnv = { ...process.env, REDIS_URL: PUBLIC_TEST_REDIS_URL };
+        // A nested node --test invocation must not inherit the outer test
+        // runner's child marker, or Node treats the fixture as an IPC child.
+        delete childEnv.NODE_TEST_CONTEXT;
         const child = spawn(process.execPath, [...baseArgs, ...chunk], {
           cwd: packageRoot,
-          env: process.env,
+          env: childEnv,
           stdio: 'inherit',
           windowsHide: true,
           detached: !isWindows,
@@ -129,4 +137,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   }
 }
 
-export { chunkFiles, resolveFiles };
+export { chunkFiles, PUBLIC_TEST_REDIS_URL, resolveFiles, run };

@@ -19,6 +19,89 @@ function run(args) {
   });
 }
 
+const isWindows = process.platform === 'win32';
+
+async function waitForFile(path, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  test(
+    `with-test-home waits for a delayed descendant before removing HOME on ${signal}`,
+    { skip: isWindows, timeout: 20_000 },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'delayed-descendant-'));
+      const parentFile = join(root, 'parent.json');
+      const readyFile = join(root, 'grandchild-ready');
+      const resultFile = join(root, 'grandchild-result.json');
+      const grandchild = `
+        const { existsSync, writeFileSync } = require('node:fs');
+        process.on('SIGTERM', () => {});
+        process.on('SIGINT', () => {});
+        writeFileSync(process.env.DELAYED_READY, 'ready');
+        setTimeout(() => {
+          writeFileSync(process.env.DELAYED_RESULT, JSON.stringify({
+            homeExists: existsSync(process.env.HOME),
+            home: process.env.HOME,
+            at: Date.now(),
+          }));
+          process.exit(0);
+        }, 1200);
+        setInterval(() => {}, 1000);
+      `;
+      const parent = `
+        const { spawn } = require('node:child_process');
+        const { writeFileSync } = require('node:fs');
+        const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' });
+        writeFileSync(process.env.DELAYED_PARENT, JSON.stringify({ pid: child.pid, home: process.env.HOME }));
+        setInterval(() => {}, 1000);
+      `;
+
+      const wrapper = spawn(process.execPath, [withTestHome, 'node', '-e', parent], {
+        cwd: resolve(__dirname, '..'),
+        env: {
+          ...process.env,
+          DELAYED_PARENT: parentFile,
+          DELAYED_READY: readyFile,
+          DELAYED_RESULT: resultFile,
+        },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      wrapper.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+
+      try {
+        await waitForFile(readyFile);
+        const observed = JSON.parse(readFileSync(parentFile, 'utf8'));
+        const started = Date.now();
+        wrapper.kill(signal);
+        await Promise.race([
+          once(wrapper, 'close'),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`wrapper did not exit after ${signal}: ${stderr}`)), 15_000),
+          ),
+        ]);
+        const elapsed = Date.now() - started;
+        await waitForFile(resultFile);
+        const descendant = JSON.parse(readFileSync(resultFile, 'utf8'));
+        assert.equal(descendant.homeExists, true, 'descendant must not observe a removed HOME');
+        assert.equal(existsSync(observed.home), false, 'HOME must be removed after the descendant exits');
+        assert.ok(elapsed >= 800, `wrapper exited before the delayed descendant (${elapsed}ms)`);
+      } finally {
+        if (wrapper.exitCode === null && wrapper.signalCode === null) wrapper.kill('SIGKILL');
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+}
+
 test('with-test-home isolates installer writes from inherited account roots and legacy HOME', () => {
   const outerRoot = mkdtempSync(join(tmpdir(), 'account-root-sentinel-'));
   const configDir = join(outerRoot, '.cat-cafe');
