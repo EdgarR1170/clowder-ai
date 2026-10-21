@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants, existsSync, realpathSync } from 'node:fs';
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { constants, existsSync, realpathSync, type Stats } from 'node:fs';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { PLUGIN_ARCHIVE_BUDGET, preflightPluginArchive } from '../external-runtime/archive-preflight.js';
 import type { LocalDirectoryOperation } from './local-directory-operation.js';
@@ -30,6 +30,21 @@ interface Budget {
   files: number;
   bytes: number;
 }
+interface PackSourceEntry {
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly mode: number;
+  /** Content identity for files (for example .npmignore) that change npm's selection. */
+  readonly digest?: string;
+}
+type PackSourceManifest = Map<string, PackSourceEntry>;
+
+// npm never publishes these root entries; copying them would either follow
+// pnpm's Windows junctions or duplicate an unbounded Git object store. Nested
+// occurrences stay visible because npm can publish test fixtures beneath them.
+const UNPUBLISHED_ROOT_ENTRIES = new Set(['node_modules', '.git']);
+// npm reads these at the package root to decide which members to publish.
+const SELECTION_FILES = new Set(['.npmignore', '.gitignore']);
 
 export interface LocalDirectoryDistributionOptions {
   readonly packagesRoot: string;
@@ -44,6 +59,9 @@ function hash(bytes: Buffer | string): string {
   return `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
 }
 function resolveNpmInvocation(npmBin: string): { command: string; prefixArgs: string[] } {
+  // An explicit npm CLI entrypoint is JavaScript, not a launcher. Node can run
+  // it everywhere, including Windows where execFile cannot start npm.cmd.
+  if (/\.(?:c|m)?js$/i.test(npmBin)) return { command: process.execPath, prefixArgs: [npmBin] };
   if (process.platform !== 'win32') return { command: npmBin, prefixArgs: [] };
   const lower = npmBin.toLowerCase();
   if (lower !== 'npm' && !lower.endsWith('.cmd')) return { command: npmBin, prefixArgs: [] };
@@ -164,18 +182,132 @@ async function writeMember(
   await lifetime.io(() => utimes(destination, 0, 0));
 }
 
-async function copyForPack(sourceRoot: string, destination: string, lifetime: LocalDirectoryOperation): Promise<void> {
+interface PackSourceDirectory {
+  readonly absolute: string;
+  readonly member: string;
+}
+
+function memberPath(directoryMember: string, name: string): string {
+  return directoryMember ? `${directoryMember}/${name}` : name;
+}
+
+function unpublishedRootEntry(directoryMember: string, name: string): boolean {
+  return directoryMember === '' && UNPUBLISHED_ROOT_ENTRIES.has(name);
+}
+
+async function visitPackSourceDirectory(
+  current: PackSourceDirectory,
+  pending: PackSourceDirectory[],
+  lifetime: LocalDirectoryOperation,
+  visit: (member: string, stat: Stats) => Promise<void>,
+): Promise<void> {
+  const entries = await lifetime.entries(current.absolute);
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    lifetime.step();
+    if (unpublishedRootEntry(current.member, entry.name)) continue;
+    const member = memberPath(current.member, entry.name);
+    const absolute = resolve(current.absolute, entry.name);
+    const stat = await lifetime.io(() => lstat(absolute));
+    // npm does not publish symbolic links or special files. Skipping them here
+    // also keeps the copy from following a link out of the selected package.
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isDirectory()) {
+      pending.push({ absolute, member });
+      continue;
+    }
+    if (stat.isFile()) await visit(member, stat);
+  }
+}
+
+async function walkPackSource(
+  sourceRoot: string,
+  lifetime: LocalDirectoryOperation,
+  visit: (member: string, stat: Stats) => Promise<void>,
+): Promise<void> {
+  const pending: PackSourceDirectory[] = [{ absolute: sourceRoot, member: '' }];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current) break;
+    await visitPackSourceDirectory(current, pending, lifetime, visit);
+  }
+}
+
+/**
+ * Build the bounded npm view of the current source package. Only the package
+ * root's dependency directory and Git store are omitted; every other member is
+ * accounted for before it is read, and the traversal observes cancellation.
+ */
+async function copyForPack(
+  sourceRoot: string,
+  destination: string,
+  lifetime: LocalDirectoryOperation,
+): Promise<PackSourceManifest> {
   await lifetime.io(() => mkdir(destination, { recursive: true, mode: 0o700 }));
-  await lifetime.io(() =>
-    cp(sourceRoot, destination, {
-      recursive: true,
-      force: true,
-      errorOnExist: false,
-      // npm ignores node_modules for publication. Copying it is both expensive
-      // and, on Windows, can make npm pack choke on pnpm's .pnpm junctions.
-      filter: (source) => !relative(sourceRoot, source).split(sep).includes('node_modules'),
-    }),
-  );
+  const budget: Budget = { files: 0, bytes: 0 };
+  const manifest: PackSourceManifest = new Map();
+  await walkPackSource(sourceRoot, lifetime, async (member, stat) => {
+    if (stat.size > PLUGIN_ARCHIVE_BUDGET.singleFileBytes) {
+      invalid('DEPENDENCY_PREPARATION_LIMIT', 'pack source member exceeds Host archive budget');
+    }
+    // Charge the candidate view, including unpublished files, before reading.
+    // A huge ignored cache is rejected instead of being copied unboundedly.
+    count(budget, stat.size);
+    const sealed = await memberBytes(sourceRoot, member, lifetime);
+    if (sealed.metadata.size !== stat.size) invalid('DEPENDENCY_SOURCE_CHANGED', 'pack source member changed');
+    await writeMember(destination, sealed.metadata, sealed.bytes, lifetime);
+    manifest.set(member, {
+      size: sealed.metadata.size,
+      mtimeMs: stat.mtimeMs,
+      mode: sealed.metadata.mode,
+      ...(SELECTION_FILES.has(basename(member)) ? { digest: sealed.metadata.digest } : {}),
+    });
+  });
+  return manifest;
+}
+
+/**
+ * Prove the copied view still describes the current source directory. npm's
+ * final dry-run can only see the copy, so a bounded walk of the original must
+ * reject new members and any .npmignore/.gitignore change first.
+ */
+async function assertPackSourceCurrent(
+  sourceRoot: string,
+  manifest: PackSourceManifest,
+  lifetime: LocalDirectoryOperation,
+): Promise<void> {
+  const current: PackSourceManifest = new Map();
+  await walkPackSource(sourceRoot, lifetime, async (member, stat) => {
+    if (stat.size > PLUGIN_ARCHIVE_BUDGET.singleFileBytes) {
+      invalid('DEPENDENCY_PREPARATION_LIMIT', 'pack source member exceeds Host archive budget');
+    }
+    let digest: string | undefined;
+    if (SELECTION_FILES.has(basename(member))) {
+      const sealed = await memberBytes(sourceRoot, member, lifetime);
+      if (sealed.metadata.size !== stat.size)
+        invalid('DEPENDENCY_SOURCE_CHANGED', 'pack source selection file changed');
+      digest = sealed.metadata.digest;
+    }
+    current.set(member, {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      mode: stat.mode & 0o777,
+      ...(digest ? { digest } : {}),
+    });
+  });
+  if (current.size !== manifest.size) invalid('DEPENDENCY_SOURCE_CHANGED', 'pack source member listing changed');
+  for (const [member, expected] of manifest) {
+    const observed = current.get(member);
+    if (
+      !observed ||
+      observed.size !== expected.size ||
+      observed.mtimeMs !== expected.mtimeMs ||
+      observed.mode !== expected.mode ||
+      observed.digest !== expected.digest
+    ) {
+      invalid('DEPENDENCY_SOURCE_CHANGED', 'pack source member changed after selection');
+    }
+  }
 }
 
 function packResult(text: string): { files: { path: string; size: number }[]; filename?: string } {
@@ -293,6 +425,7 @@ export async function prepareLocalDirectoryDistribution(
     ];
     const selectionBudget: Budget = { files: 0, bytes: 0 };
     const packSources = new Map<number, string>();
+    const packSourceManifests = new Map<number, PackSourceManifest>();
     // Admission source defines content provenance. Lock SRI remains coordinate
     // metadata; every physical package is sealed as owner-local publication bytes.
     await source.assertCurrent();
@@ -300,7 +433,7 @@ export async function prepareLocalDirectoryDistribution(
     for (const node of nodes.values()) {
       const packSource = resolve(operation, 'pack-sources', String(node.id));
       packSources.set(node.id, packSource);
-      await copyForPack(node.source.root, packSource, lifetime);
+      packSourceManifests.set(node.id, await copyForPack(node.source.root, packSource, lifetime));
       const selected = packResult((await run(['pack', '--dry-run', '--json', ...npmArgs, packSource])).stdout);
       const snapshot = resolve(operation, `node-${node.id}`);
       const packDirectory = resolve(operation, 'packs', String(node.id));
@@ -421,6 +554,12 @@ export async function prepareLocalDirectoryDistribution(
       ) {
         invalid('DEPENDENCY_SOURCE_CHANGED', 'source publication policy changed');
       }
+      // The dry-run above proves only that the frozen copy still selects the
+      // sealed members. Re-walk the original directory afterwards so a member
+      // added during packing, or an edited .npmignore, has current evidence.
+      const manifest = packSourceManifests.get(node.id);
+      if (!manifest) invalid('DEPENDENCY_PREPARATION_LIMIT', 'missing pack source manifest');
+      await assertPackSourceCurrent(node.source.root, manifest, lifetime);
     }
     await source.assertCurrent();
     const receipt = {
