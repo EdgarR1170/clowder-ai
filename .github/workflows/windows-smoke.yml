@@ -210,6 +210,8 @@ jobs:
           node --test packages/api/test/cli-spawn-win.test.js
           node --test packages/api/test/process-liveness-probe.test.js
           node --test packages/api/test/pick-directory.test.js
+      - name: Browser env wrapper regression
+        run: node --test --test-name-pattern='applies --env' packages/web/test/run-with-node-env-test.test.cjs
       # #1542: the compaction launch plan must hold on Windows (realpath
       # backslash semantics, junction escapes, canonical containment).
       - name: F296 compaction launch plan (Windows paths)
