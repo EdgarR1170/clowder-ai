@@ -212,6 +212,8 @@ jobs:
           node --test packages/api/test/pick-directory.test.js
       - name: Windows stale-process entrypoint guard
         run: node --test scripts/cleanup-stale-dev-processes.test.mjs
+      - name: API dev supervisor regression
+        run: node --test packages/api/test/dev-supervisor.test.js
       # #1542: the compaction launch plan must hold on Windows (realpath
       # backslash semantics, junction escapes, canonical containment).
       - name: F296 compaction launch plan (Windows paths)

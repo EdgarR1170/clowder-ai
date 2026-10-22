@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "while true; do NODE_OPTIONS=\"--import $PWD/scripts/sigusr1-guard.mjs${NODE_OPTIONS:+ $NODE_OPTIONS}\" tsx watch --exclude \"dist/**\" --exclude \"../shared/dist/**\" src/index.ts; ec=$?; if [ $ec -eq 0 ] || [ $ec -eq 130 ]; then break; fi; echo \"[api] dev exited ($ec) — auto-restarting in 1s\"; sleep 1; done",
+    "dev": "node scripts/dev-supervisor.mjs",
     "verify:sigusr1": "node scripts/verify-sigusr1-guard.mjs",
     "build": "pnpm --dir ../shared build && tsc && node ./scripts/copy-bundled-plugin-packages.mjs && node ./scripts/copy-marketplace-catalog-data.mjs && node ../../scripts/check-provider-request-recorder.mjs",
     "gate:f202-artifacts": "node scripts/f202-connector-artifact-gate.mjs",

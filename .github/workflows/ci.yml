@@ -40,6 +40,8 @@ jobs:
           python3 -B .github/scripts/public-test-namespace-init.test.py
           sudo --preserve-env "$(command -v node)" --test .github/scripts/run-public-test-distributable.test.mjs
       - run: pnpm check
+      - name: API dev supervisor regression
+        run: node --test packages/api/test/dev-supervisor.test.js
 
   build:
     name: Build
