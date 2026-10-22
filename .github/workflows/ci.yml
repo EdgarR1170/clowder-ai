@@ -59,6 +59,11 @@ jobs:
           --script test:onboarding:production-contracts
       - run: pnpm --filter @cat-cafe/shared build
       - run: pnpm --filter @cat-cafe/api build
+      - name: Plugin native auth link diagnostic
+        run: >-
+          pnpm --filter @cat-cafe/api exec node ./scripts/with-test-home.mjs
+          node --import tsx --test --test-timeout=60000 --test-name-pattern="auth link"
+          test/f320-plugin-account.test.ts
       - name: Native PR and Issue tracking source fence (original candidate bytes)
         shell: bash
         run: |
