@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { isStalePencilProbe, PENCIL_PROBE_RULE, pencilOwnedDescendants } from './lib/pencil-codex-probe-policy.mjs';
 import { enrichPencilProbes, revalidatePencilFinding } from './lib/pencil-codex-probes.mjs';
 import { isCatCafeCommand, STALE_DEV_PROCESS_RULES } from './lib/stale-dev-process-rules.mjs';
@@ -230,6 +232,13 @@ async function killFindings(findings) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
+  if (process.platform === 'win32') {
+    console.error(
+      '[stale-dev-processes] Windows process enumeration/cleanup is not supported yet; no processes were inspected or terminated.',
+    );
+    process.exitCode = 1;
+    return;
+  }
   const run = argv.includes('--run');
   const pencilOnly = argv.includes('--pencil-only');
   const psOutput = listProcesses();
@@ -240,6 +249,16 @@ export async function main(argv = process.argv.slice(2)) {
   if (run) await killFindings(findings);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isDirectExecution() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(resolve(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExecution()) {
   await main();
 }
