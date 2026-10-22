@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -32,6 +32,25 @@ test('succeeds when the target is already absent', () => {
     assert.equal(result.status, 0, result.stderr);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('refuses an intermediate link that redirects deletion outside the current directory', () => {
+  const base = mkdtempSync(join(tmpdir(), 'clean-path-'));
+  const packageRoot = join(base, 'package');
+  const outside = join(base, 'outside');
+  const victim = join(outside, 'victim');
+  try {
+    mkdirSync(packageRoot);
+    mkdirSync(outside);
+    writeFileSync(victim, 'must survive');
+    symlinkSync(outside, join(packageRoot, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
+    const result = run(packageRoot, ['link/victim']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /redirected outside/);
+    assert.equal(existsSync(victim), true, 'must not delete through an intermediate link');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });
 
