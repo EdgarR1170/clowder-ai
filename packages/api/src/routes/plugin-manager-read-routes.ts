@@ -35,6 +35,45 @@ export function registerPluginManagerReadRoutes(app: FastifyInstance, options: P
     }
   });
 
+  app.get('/api/plugin-manager/plugins/_local', async (request, reply) => {
+    const access = requirePluginReadAccess(request, accessOptions);
+    if ('error' in access) return pluginAccessError(reply, access);
+    try {
+      return await options.manager.listLocal();
+    } catch (error) {
+      return sendManagerError(reply, error);
+    }
+  });
+
+  app.get('/api/plugin-manager/plugins/_local/search', async (request, reply) => {
+    const access = requirePluginReadAccess(request, accessOptions);
+    if ('error' in access) return pluginAccessError(reply, access);
+    const parsed = searchQuerySchema.safeParse(request.query);
+    if (!parsed.success) return invalidRequest(reply);
+    try {
+      return await options.manager.searchLocal(parsed.data.q);
+    } catch (error) {
+      return sendManagerError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { pluginId: string } }>('/api/plugin-manager/plugins/_local/:pluginId', async (request, reply) => {
+    const access = requirePluginReadAccess(request, accessOptions);
+    if ('error' in access) return pluginAccessError(reply, access);
+    const parsedId = pluginIdSchema.safeParse(request.params.pluginId);
+    if (!parsedId.success) return invalidRequest(reply);
+    try {
+      const detail = await options.manager.getLocal(parsedId.data);
+      if (options.bindings && detail.plugin.artifact === 'installed') {
+        const owner = request.callbackPrincipal?.userId ?? access.operator;
+        detail.plugin = { ...detail.plugin, bindings: await options.bindings.list(parsedId.data, owner) };
+      }
+      return detail;
+    } catch (error) {
+      return sendManagerError(reply, error);
+    }
+  });
+
   app.get<{ Params: { pluginId: string } }>('/api/plugin-manager/plugins/:pluginId/icon', async (request, reply) => {
     const access = requirePluginReadAccess(request, accessOptions);
     if ('error' in access) return pluginAccessError(reply, access);

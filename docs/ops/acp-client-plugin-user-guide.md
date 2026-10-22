@@ -225,6 +225,9 @@ Claude 桥如找不到原生 Claude，可按桥要求设置 `CLAUDE_CODE_EXECUTA
 仅在另一个终端设置变量不会改变已启动的 Host。当前表单没有每 client 独立 `env`、`cwd` 或 ACP URL。
 模型/API 密钥沿用原生客户端配置或私有启动环境，不能放进 ID、名称或参数，不提交认证文件。
 
+DSH 的自定义 provider 配置属于各自 profile：Desktop/Web 可用不代表 `--profile acp` 已选中该路由。
+若 ACP 仍要求官方 DeepSeek key，按[DSH ACP 自定义 LLM 指南](dsh-custom-llm-acp.md)检查路由声明、默认选择和实际配置根。
+
 ## 4. 用户日常感知与第一条验证消息
 
 配置完成后，日常只在 Clowder 里操作。例如：

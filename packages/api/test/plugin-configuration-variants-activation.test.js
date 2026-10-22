@@ -8,12 +8,15 @@
  * materialized MCP capability env, so no consumer can silently regress while unit tests stay green.
  */
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { afterEach, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { catRegistry } from '@cat-cafe/shared';
 import { validateEffectiveGrants, validateManifest } from '@clowder-ai/plugin-contract';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import { fileBasedMcpIO } from '../dist/config/capabilities/capability-mcp-service.js';
 import {
@@ -136,7 +139,7 @@ function feishuManifest() {
   };
 }
 
-async function writeFixturePackage(nativeAction = false) {
+async function writeFixturePackage(nativeAction = false, mcpTools = false) {
   const packageRoot = await tempRoot('cat-cafe-variants-feishu-package-');
   await mkdir(join(packageRoot, 'dist'), { recursive: true });
   const manifest = feishuManifest();
@@ -147,15 +150,40 @@ async function writeFixturePackage(nativeAction = false) {
     'export default { create() { return { start() { return { actions: { "native.run": async input => input }, stop() {} }; } }; } };\n',
     'utf8',
   );
-  await writeFile(join(packageRoot, 'dist/mcp.js'), 'process.exit(0);\n', 'utf8');
+  await writeFile(
+    join(packageRoot, 'dist/mcp.js'),
+    mcpTools
+      ? `import { createInterface } from 'node:readline';
+if (!process.env.CLOWDER_PLUGIN_ACTION_TOKEN) process.exit(2);
+createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  const result = request.method === 'initialize'
+    ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'runtime-root-fixture', version: '1' } }
+    : { tools: [{ name: 'fixture_native_action', inputSchema: { type: 'object' } }] };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+});
+`
+      : 'process.exit(0);\n',
+    'utf8',
+  );
   return packageRoot;
 }
 
 /** Install, configure, then enable — the real owner path. Returns the materialized MCP env. */
-async function installConfigureEnable(updates) {
-  const projectRoot = await tempRoot('cat-cafe-variants-feishu-project-');
-  const packageRoot = await writeFixturePackage();
-  const { runtime } = createRuntime(projectRoot);
+async function installConfigureEnable(updates, roots) {
+  const projectRoot =
+    (roots?.configOnWorkspace ? roots.workspace : roots?.runtime) ??
+    (await tempRoot('cat-cafe-variants-feishu-project-'));
+  const configRoot = roots?.workspace ?? projectRoot;
+  const packageRoot = await writeFixturePackage(Boolean(roots), roots?.mcpTools);
+  const io = roots
+    ? fileBasedMcpIO(configRoot, {
+        google: join(configRoot, '.gemini/settings.json'),
+        antigravity: join(configRoot, '.test-antigravity/mcp.json'),
+      })
+    : undefined;
+  const { runtime } = createRuntime(projectRoot, io);
   const composition = createPluginManagerRuntimeComposition({
     runtime,
     catalogProvider: { snapshot: async () => ({ entries: [], status: 'fresh', checkedAt: 1 }) },
@@ -173,10 +201,10 @@ async function installConfigureEnable(updates) {
     enabled: true,
     expectedRevision: beforeEnable.lifecycleRevision,
   });
-  const capability = (await readCapabilitiesConfig(projectRoot))?.capabilities.find(
+  const capability = (await readCapabilitiesConfig(configRoot))?.capabilities.find(
     (candidate) => candidate.type === 'mcp' && candidate.pluginId === installed.pluginId,
   );
-  return { capability, composition, installed };
+  return { capability, composition, installed, runtime };
 }
 
 test('websocket mode without a Token activates with no FEISHU_TOKEN on the MCP launch env', async () => {
@@ -257,7 +285,16 @@ test('variant changes refresh existing project MCP providers while preserving me
   const initial = await entryAt(consumer);
   assert.ok(initial?.mcpServer, 'activation must reach an existing project automatically');
   assert.equal(Object.hasOwn(initial.mcpServer.env ?? {}, 'FEISHU_TOKEN'), false);
-  const initialActionToken = initial.mcpServer.env.CLOWDER_PLUGIN_ACTION_TOKEN;
+  assert.equal(
+    initial.mcpServer.env.CLOWDER_PLUGIN_ACTION_TOKEN,
+    runtime.supervisor.nativeActions.environmentReferences(installed.pluginInstanceId, 'feishu-mcp')
+      .CLOWDER_PLUGIN_ACTION_TOKEN,
+    'registration must persist only an environment reference',
+  );
+  const initialActionToken = runtime.supervisor.nativeActions.environment(
+    installed.pluginInstanceId,
+    'feishu-mcp',
+  ).CLOWDER_PLUGIN_ACTION_TOKEN;
   assert.ok(initialActionToken);
   const allCats = [...catRegistry.getAllIds()];
   const allowedCat = allCats.find((catId) => catId !== 'codex');
@@ -330,3 +367,191 @@ test('variant changes refresh existing project MCP providers while preserving me
     await runtime.supervisor.stopAll('test_complete');
   }
 });
+
+for (const configOnWorkspace of [false, true])
+  test(`production composition launches plugins across separate runtime/workspace roots (configOnWorkspace=${configOnWorkspace})`, async (t) => {
+    const runtimeRoot = await tempRoot('plugin-runtime-wiring-');
+    const workspaceRoot = await tempRoot('plugin-workspace-wiring-');
+    const consumer = await tempRoot('plugin-consumer-wiring-');
+    const saved = Object.fromEntries(
+      ['CAT_CAFE_RUNTIME_ROOT', 'CAT_CAFE_WORKSPACE_ROOT'].map((key) => [key, process.env[key]]),
+    );
+    let ownedRuntime;
+    t.after(() => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+    try {
+      process.env.CAT_CAFE_RUNTIME_ROOT = runtimeRoot;
+      process.env.CAT_CAFE_WORKSPACE_ROOT = workspaceRoot;
+      await writeCapabilitiesConfig(workspaceRoot, { version: 2, capabilities: [] });
+      const f = await installConfigureEnable(
+        [
+          { key: 'connectionMode', value: 'websocket' },
+          { key: 'appId', value: 'cli_1' },
+        ],
+        { runtime: runtimeRoot, workspace: workspaceRoot, configOnWorkspace },
+      );
+      ownedRuntime = f.runtime;
+      await writeCapabilitiesConfig(consumer, { version: 2, capabilities: [f.capability] });
+      const id = f.capability.id;
+      const live = await f.runtime.supervisor.resolveNativeMcpLaunch({
+        mode: 'plugin_native',
+        pluginInstanceId: f.installed.pluginInstanceId,
+        contributionId: 'feishu-mcp',
+        actionMethods: ['native.run'],
+      });
+      assert.ok(live?.env.CLOWDER_PLUGIN_ACTION_TOKEN);
+      assert.match(f.capability.mcpServer.env.CLOWDER_PLUGIN_ACTION_TOKEN, /^\$\{[A-Z0-9_]+\}$/);
+      const servers = await resolveProviderMcpConfig({
+        workingDirectory: consumer,
+        mcpServerPath: join(runtimeRoot, 'packages/mcp-server/dist/index.js'),
+        callbackEnv: { CAT_CAFE_CAT_ID: catRegistry.getAllIds()[0] },
+      });
+      const server = servers[id.replaceAll(':', '__')];
+      assert.ok(server, 'real composition must provide the live plugin despite distinct runtime/workspace roots');
+      assert.equal(server.env.CLOWDER_PLUGIN_ACTION_TOKEN, live.env.CLOWDER_PLUGIN_ACTION_TOKEN);
+      assert.equal(server.command, live.command);
+      assert.deepEqual(server.args, [...live.args]);
+    } finally {
+      await ownedRuntime?.shutdown();
+    }
+  });
+
+test('package API cwd without runtime override reaches MCP tools/list through production composition', async () => {
+  const runtimeRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+  const workspaceRoot = await tempRoot('plugin-api-cwd-policy-');
+  const consumer = await tempRoot('plugin-api-cwd-consumer-');
+  const previousCwd = process.cwd();
+  const saved = Object.fromEntries(
+    ['CAT_CAFE_RUNTIME_ROOT', 'CAT_CAFE_WORKSPACE_ROOT'].map((key) => [key, process.env[key]]),
+  );
+  let ownedRuntime;
+  let client;
+  try {
+    delete process.env.CAT_CAFE_RUNTIME_ROOT;
+    delete process.env.CAT_CAFE_WORKSPACE_ROOT;
+    process.chdir(join(runtimeRoot, 'packages/api'));
+    await writeCapabilitiesConfig(workspaceRoot, { version: 2, capabilities: [] });
+    const f = await installConfigureEnable(
+      [
+        { key: 'connectionMode', value: 'websocket' },
+        { key: 'appId', value: 'cli_1' },
+      ],
+      {
+        runtime: runtimeRoot,
+        workspace: workspaceRoot,
+        configOnWorkspace: true,
+        mcpTools: true,
+      },
+    );
+    ownedRuntime = f.runtime;
+    await writeCapabilitiesConfig(consumer, { version: 2, capabilities: [f.capability] });
+    const servers = await resolveProviderMcpConfig({
+      workingDirectory: consumer,
+      mcpServerPath: join(runtimeRoot, 'packages/mcp-server/dist/index.js'),
+      callbackEnv: { CAT_CAFE_CAT_ID: catRegistry.getAllIds()[0] },
+    });
+    const server = servers[f.capability.id.replaceAll(':', '__')];
+    assert.ok(server, 'an enabled plugin must remain discoverable from the normal packages/api startup cwd');
+    client = new Client({ name: 'api-cwd-acceptance', version: '1' });
+    await client.connect(new StdioClientTransport({ command: server.command, args: server.args, env: server.env }));
+    const tools = await client.listTools();
+    assert.deepEqual(
+      tools.tools.map((tool) => tool.name),
+      ['fixture_native_action'],
+    );
+  } finally {
+    await client?.close();
+    await ownedRuntime?.shutdown();
+    process.chdir(previousCwd);
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+for (const legacy of ['missing-env-mapping', 'persisted-old-token']) {
+  test(`startup recovers an already installed plugin with ${legacy} without reinstall or retoggle`, async () => {
+    const host = await tempRoot('plugin-existing-install-upgrade-');
+    const consumer = await tempRoot('plugin-existing-install-consumer-');
+    await writeCapabilitiesConfig(host, { version: 2, capabilities: [] });
+    const f = await installConfigureEnable(
+      [
+        { key: 'connectionMode', value: 'webhook' },
+        { key: 'verificationToken', value: ' preserved legacy secret ' },
+        { key: 'appId', value: 'existing-app' },
+      ],
+      { runtime: host, workspace: host, mcpTools: true },
+    );
+    const before = await f.runtime.inventoryStore.snapshot();
+    const originalReference = f.capability.mcpServer.env.CLOWDER_PLUGIN_ACTION_TOKEN;
+    const previousToken = process.env[originalReference.slice(2, -1)];
+    await f.runtime.shutdown();
+    delete process.env[originalReference.slice(2, -1)];
+    const existing = structuredClone(f.capability);
+    delete existing.mcpServer.env.CLOWDER_PLUGIN_ACTION_TOKEN;
+    delete existing.mcpServer.env.CLOWDER_PLUGIN_ACTION_PATH;
+    if (legacy === 'persisted-old-token') {
+      existing.mcpServer.env.CLOWDER_PLUGIN_ACTION_TOKEN = previousToken;
+      existing.mcpServer.env.CLOWDER_PLUGIN_ACTION_PATH = '/api/plugin-runtime/action';
+    }
+    await writeCapabilitiesConfig(host, { version: 2, capabilities: [existing] });
+    await writeCapabilitiesConfig(consumer, { version: 2, capabilities: [existing] });
+    const projectFile = join(consumer, '.cat-cafe/capabilities.json');
+    const projectBytes = await readFile(projectFile, 'utf8');
+    const { runtime: restarted } = createRuntime(host);
+    let client;
+    try {
+      const recovery = await restarted.recoverAfterRestart();
+      await restarted.lifecycle.drainRestartRecovery();
+      assert.equal(recovery.resumeRequested, 1);
+      const registered = (await readCapabilitiesConfig(host)).capabilities.find((e) => e.id === existing.id);
+      assert.equal(registered.mcpServer.env.CLOWDER_PLUGIN_ACTION_TOKEN, originalReference);
+      const token = process.env[originalReference.slice(2, -1)];
+      assert.ok(token);
+      assert.notEqual(token, previousToken);
+      const after = await restarted.inventoryStore.snapshot();
+      assert.deepEqual(after.grants, before.grants);
+      assert.equal(after.instances[0].pluginInstanceId, before.instances[0].pluginInstanceId);
+      assert.equal(after.instances[0].packageDigest, before.instances[0].packageDigest);
+      assert.equal(after.instances[0].activationState, 'enabled');
+      const servers = await resolveProviderMcpConfig({
+        workingDirectory: consumer,
+        mcpServerPath: join(host, 'packages/mcp-server/dist/index.js'),
+        callbackEnv: { CAT_CAFE_CAT_ID: catRegistry.getAllIds()[0] },
+      });
+      const server = servers[existing.id.replaceAll(':', '__')];
+      assert.ok(server);
+      assert.equal(server.env.CLOWDER_PLUGIN_ACTION_TOKEN, token);
+      assert.equal(server.env.FEISHU_TOKEN, ' preserved legacy secret ');
+      assert.equal(await readFile(projectFile, 'utf8'), projectBytes, 'unregistered legacy project needs no rewrite');
+      client = new Client({ name: 'existing-install-upgrade', version: '1' });
+      await client.connect(new StdioClientTransport({ command: server.command, args: server.args, env: server.env }));
+      assert.deepEqual(
+        (await client.listTools()).tools.map((t) => t.name),
+        ['fixture_native_action'],
+      );
+      const caller = {
+        userId: 'owner',
+        catId: 'codex',
+        threadId: 'fixture',
+        invocationId: 'fixture',
+        assertCurrent: async () => {},
+      };
+      assert.deepEqual(
+        await restarted.supervisor.nativeActions.call(token, 'native.run', { value: 'recovered' }, caller),
+        { value: 'recovered' },
+      );
+      await assert.rejects(restarted.supervisor.nativeActions.call(previousToken, 'native.run', {}, caller), {
+        statusCode: 401,
+      });
+    } finally {
+      await client?.close();
+      await restarted.shutdown();
+    }
+  });
+}

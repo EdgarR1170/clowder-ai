@@ -37,7 +37,17 @@ import { installPluginUpload, PluginManagerUploadError, readPluginUpload } from 
 
 type PluginManagerRouteService = Pick<
   PluginManagerService,
-  'list' | 'search' | 'get' | 'install' | 'update' | 'configure' | 'setEnabled' | 'uninstall'
+  | 'list'
+  | 'listLocal'
+  | 'search'
+  | 'searchLocal'
+  | 'get'
+  | 'getLocal'
+  | 'install'
+  | 'update'
+  | 'configure'
+  | 'setEnabled'
+  | 'uninstall'
 >;
 
 export interface PluginManagerRouteOptions {

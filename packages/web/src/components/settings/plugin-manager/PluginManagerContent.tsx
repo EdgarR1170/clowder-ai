@@ -116,7 +116,7 @@ export function PluginManagerContent({
 }: {
   fixtures: readonly PluginManagerDesignFixture[];
   pageHeader?: Omit<SettingsPageHeaderProps, 'children'>;
-  catalogStatus?: 'fresh' | 'stale' | 'degraded' | 'unavailable';
+  catalogStatus?: 'loading' | 'fresh' | 'stale' | 'degraded' | 'unavailable';
   catalogMessage?: string;
   loading?: boolean;
   error?: string | null;

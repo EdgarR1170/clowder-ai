@@ -654,10 +654,13 @@ export function createDormantPluginRuntimeComposition(
   };
 }
 
-function catalogStatus(status: 'bootstrap' | 'fresh' | 'degraded'): PluginManagerCatalogSnapshot['status'] {
+function catalogStatus(
+  status: 'bootstrap' | 'fresh' | 'degraded',
+  bootstrapStatus: 'stale' | 'loading' = 'stale',
+): PluginManagerCatalogSnapshot['status'] {
   if (status === 'fresh') return 'fresh';
   if (status === 'degraded') return 'degraded';
-  return 'stale';
+  return bootstrapStatus;
 }
 
 function manifestIcon(manifest: PluginManifest | undefined): PluginIconSpec | undefined {
@@ -717,7 +720,16 @@ export class OfficialPluginManagerCatalogAdapter implements PluginManagerCatalog
     return this.projectSnapshot(releaseSnapshot);
   }
 
-  projectSnapshot(releaseSnapshot: OfficialPluginCatalogSnapshot): PluginManagerCatalogSnapshot {
+  async localSnapshot(): Promise<PluginManagerCatalogSnapshot> {
+    const releaseSnapshot =
+      (await this.provider.localSnapshot?.()) ?? ({ entries: [], status: 'bootstrap', checkedAt: null } as const);
+    return this.projectSnapshot(releaseSnapshot, 'loading');
+  }
+
+  projectSnapshot(
+    releaseSnapshot: OfficialPluginCatalogSnapshot,
+    bootstrapStatus: 'stale' | 'loading' = 'stale',
+  ): PluginManagerCatalogSnapshot {
     const manifests = validatedManifestMap(this.packageManifests, this.manifestValidator);
     const candidates: PluginManagerCatalogCandidate[] = [];
     let metadataMismatch = false;
@@ -731,7 +743,7 @@ export class OfficialPluginManagerCatalogAdapter implements PluginManagerCatalog
     }
     return {
       candidates,
-      status: metadataMismatch ? 'degraded' : catalogStatus(releaseSnapshot.status),
+      status: metadataMismatch ? 'degraded' : catalogStatus(releaseSnapshot.status, bootstrapStatus),
       refreshedAt: releaseSnapshot.checkedAt,
       ...(metadataMismatch
         ? { message: 'Published plugin metadata did not match the discovered release.' }
