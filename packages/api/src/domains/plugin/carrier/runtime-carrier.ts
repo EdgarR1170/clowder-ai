@@ -186,6 +186,7 @@ export class PluginRuntimeCarrierRouter implements PluginRuntimeLifecyclePort {
       },
     );
     this.#nativeMcpLaunches.activate(admission, generation, launches);
+    await this.#runtimeContributions.refreshAgentSessionProviders(admission);
   }
 
   async stopAll(reason = 'host_shutdown'): Promise<void> {
