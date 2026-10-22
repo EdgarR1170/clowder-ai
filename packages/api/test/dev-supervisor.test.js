@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -68,6 +70,55 @@ test('dev supervisor restarts a failed child and stops on clean exit', async () 
   assert.equal(messages.length, 1);
   assert.match(messages[0], /\[api\] dev exited \(1\)/);
   assert.match(messages[0], /auto-restarting in 1s/);
+});
+
+for (const [signal, expectedCode] of [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+]) {
+  test(`dev supervisor stops with ${expectedCode} when ${signal} arrives during restart backoff`, async () => {
+    const child = new EventEmitter();
+    child.kill = () => {};
+    setImmediate(() => child.emit('exit', 1, null));
+    const signals = new EventEmitter();
+    let spawnCount = 0;
+    const exits = [];
+    await runDevSupervisor({
+      root: packageRoot,
+      tsxCli: join(packageRoot, 'fake-tsx.mjs'),
+      spawnChild: () => {
+        spawnCount += 1;
+        return child;
+      },
+      signalSource: signals,
+      exit: (code) => exits.push(code),
+      sleepFn: async () => signals.emit(signal),
+      log: { error: () => {} },
+    });
+
+    assert.deepEqual(exits, [expectedCode]);
+    assert.equal(spawnCount, 1);
+  });
+}
+
+test('dev supervisor direct execution follows a directory alias', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'cat-cafe-dev-supervisor-alias-'));
+  try {
+    const alias = join(directory, 'alias with spaces');
+    symlinkSync(join(packageRoot, 'scripts'), alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const fakeCli = join(directory, 'fake-tsx.mjs');
+    writeFileSync(fakeCli, "console.log('FAKE_TSX_STARTED');\n", 'utf8');
+    const result = spawnSync(process.execPath, [join(alias, 'dev-supervisor.mjs')], {
+      cwd: packageRoot,
+      encoding: 'utf8',
+      env: { ...process.env, CAT_CAFE_DEV_TSX_CLI: fakeCli },
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /FAKE_TSX_STARTED/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('dev supervisor package entry points at the Node supervisor', async () => {
