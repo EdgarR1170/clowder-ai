@@ -1,0 +1,5 @@
+affine-cipher
+binary
+beer-song
+book-store
+connect
