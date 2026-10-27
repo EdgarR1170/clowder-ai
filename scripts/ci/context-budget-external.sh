@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -u
 
 COMMIT="7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f"
@@ -18,7 +18,7 @@ git -C "$SRC" checkout -q FETCH_HEAD
 
 pass=0
 fail=0
-for variant in baseline compressed; do
+for variant in deepseek kimi; do
   while IFS= read -r task; do
     [ -z "$task" ] && continue
     task_dir="$SRC/javascript/exercises/practice/$task"
@@ -61,3 +61,4 @@ done < "$RESULTS/summary.tsv"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
+
