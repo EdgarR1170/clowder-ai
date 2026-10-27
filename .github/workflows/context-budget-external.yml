@@ -1,0 +1,21 @@
+name: Context budget external validation
+
+on:
+  push:
+    branches: [experiment/context-budget-external]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  aider-js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run external repository-owned tests
+        run: bash scripts/ci/context-budget-external.sh
