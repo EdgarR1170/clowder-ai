@@ -18,7 +18,7 @@ git -C "$SRC" checkout -q FETCH_HEAD
 
 pass=0
 fail=0
-for variant in deepseek kimi; do
+for variant in deepseek kimi verify; do
   while IFS= read -r task; do
     [ -z "$task" ] && continue
     task_dir="$SRC/javascript/exercises/practice/$task"
@@ -61,4 +61,5 @@ done < "$RESULTS/summary.tsv"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
+
 
