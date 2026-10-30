@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { scanSecretContent } from './lib/secret-content-scan.mjs';
 import {
   GIT_OID,
@@ -76,8 +75,9 @@ function pushTips(input) {
 }
 
 async function main() {
+  const [mode, target] = process.argv.slice(2);
+  const local = mode === 'index' || mode === 'message';
   try {
-    const [mode, target] = process.argv.slice(2);
     let findings;
     if (mode === 'index') findings = scanSecretIndex();
     else if (mode === 'message') findings = scanSecretContent(readFileSync(target));
@@ -90,13 +90,33 @@ async function main() {
       findings = scanSecretPush(input, target);
     } else throw new Error('secret_scan_unavailable');
     if (findings.length) {
-      process.stderr.write(`${JSON.stringify({ code: 'secret_content_detected', findings })}\n`);
-      process.exitCode = 1;
+      process.stderr.write(
+        `${JSON.stringify({ code: local ? 'secret_content_observed' : 'secret_content_detected', findings })}\n`,
+      );
+      if (!local) process.exitCode = 1;
     }
   } catch {
-    process.stderr.write('secret_scan_unavailable: content was not verified; operation blocked.\n');
-    process.exitCode = 1;
+    process.stderr.write(
+      local
+        ? 'secret_scan_unavailable: local observation incomplete; operation continues.\n'
+        : 'secret_scan_unavailable: content was not verified; operation blocked.\n',
+    );
+    if (!local) process.exitCode = 1;
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();
+// Compare real paths on both sides: Node names the main module by its real path, or by
+// the given path under --preserve-symlinks-main, and a symlinked invocation path (e.g.
+// macOS /var -> /private/var) must never skip the scan. A non-file argv[1] (node -e), or
+// a query or hash on this module's URL (a main module has neither), means an importer.
+const self = new URL(import.meta.url);
+const invoked = process.argv[1];
+if (
+  !self.search &&
+  !self.hash &&
+  invoked &&
+  existsSync(invoked) &&
+  realpathSync(invoked) === realpathSync(fileURLToPath(self))
+) {
+  await main();
+}

@@ -1,8 +1,8 @@
 import { dirname, resolve } from 'node:path';
-import type { CapabilitiesConfig, PluginIconSpec, PluginManagerDetail } from '@cat-cafe/shared';
+import type { PluginIconSpec, PluginManagerDetail } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import type { DeliveryPresentationContext } from '@clowder-ai/plugin-contract';
-import { type Capability, type PluginManifest } from '@clowder-ai/plugin-contract';
+import { type PluginManifest } from '@clowder-ai/plugin-contract';
 import { fileBasedMcpIO, type McpConfigIO } from '../../config/capabilities/capability-mcp-service.js';
 import { allowsImplicitCapabilityWrites } from '../../config/capabilities/startup-cli-config.js';
 import { createThreadDeepLinkUrl, resolveFrontendBaseUrl } from '../../config/frontend-origin.js';
@@ -95,7 +95,6 @@ import {
 import { HostPluginConfigurationService } from './manager/plugin-manager-configuration.js';
 import {
   type PluginManagerCatalogCandidate,
-  pluginManagerCapabilitiesFromManifest,
   pluginManagerContributionsFromManifest,
   projectPluginManagerCatalogCandidate,
 } from './manager/plugin-manager-projection.js';
@@ -116,6 +115,7 @@ import type { PluginRuntimeConfigurationPort } from './manifest-configuration-pr
 import { HostMediaSourceImporter } from './media-source-importer.js';
 import { type OfficialPluginCatalogEntry, officialPluginPresentationMatches } from './official-catalog.js';
 import { OfficialPluginPackageInstaller } from './official-package-installer.js';
+import { PluginProjectOutputs } from './outputs/project-output-actions.js';
 import { readPluginConfig } from './plugin-config-store.js';
 
 type BuiltinPluginRuntime = Pick<BundledPluginRuntime, 'start' | 'stop'>;
@@ -127,6 +127,7 @@ export interface PluginRuntimePersistencePaths {
 }
 
 export interface DormantPluginRuntimeCompositionOptions {
+  readonly collectiveMaterialSource?: import('./host-surface/collective-material-source.js').CollectiveMaterialSourceHolder;
   readonly collectiveArtifactOwner?: import('./host-surface/collective-artifact-owner.js').CollectiveArtifactOwnerHolder;
   readonly builtinRuntimes?: ReadonlyMap<string, BuiltinPluginRuntime>;
   readonly taskArtifactReader?: import('../growing/ports/PreparedArtifactReader.js').PreparedArtifactReader;
@@ -134,6 +135,8 @@ export interface DormantPluginRuntimeCompositionOptions {
   /** Persistent capability authority used by native invocations and Settings;
    * package/config/inventory storage retains its existing projectRoot. */
   readonly capabilityProjectRoot?: string;
+  /** Executable checkout used to distinguish a development worktree from its persistent config root. */
+  readonly binaryProjectRoot?: string;
   readonly paths?: PluginRuntimePersistencePaths;
   readonly messageStore: IMessageStore;
   readonly lifecyclePresentation?: LifecycleDeliveryDeps['presentation'];
@@ -472,6 +475,7 @@ export function createDormantPluginRuntimeComposition(
       }),
     neutral: (pluginInstanceId, packageDigest, assertActivation, activationSignal) =>
       createPluginNeutralHost({
+        ...(options.collectiveMaterialSource ? { collectiveMaterialSource: options.collectiveMaterialSource } : {}),
         ...(options.collectiveArtifactOwner ? { collectiveArtifactOwner: options.collectiveArtifactOwner } : {}),
         ...(activationSignal ? { activationSignal } : {}),
         pluginInstanceId,
@@ -537,7 +541,10 @@ export function createDormantPluginRuntimeComposition(
     inventoryStore,
     {
       projectRoot: capabilityProjectRoot,
-      persistCapabilities: allowsImplicitCapabilityWrites(),
+      persistCapabilities: allowsImplicitCapabilityWrites(
+        process.env,
+        options.binaryProjectRoot ?? options.projectRoot,
+      ),
       packages,
       mcpPackages: builtinPackages,
       resourcesRoot: resolve(dirname(paths.inventorySnapshotPath), PLUGIN_HOST_ENTRIES.resources),
@@ -562,6 +569,12 @@ export function createDormantPluginRuntimeComposition(
         reason === PLUGIN_OWNER_UNINSTALLED_REASON ? 'instance_uninstalled' : 'instance_stopped',
       );
     },
+    new PluginProjectOutputs({
+      root: resolve(dirname(paths.inventorySnapshotPath), PLUGIN_HOST_ENTRIES.projectOutputs),
+      importer: mediaImporter,
+      ledger: mediaLedger,
+      ...(options.threadStore ? { threads: options.threadStore } : {}),
+    }),
   );
   deliveryTarget.current = supervisor;
   supervisor.register(
@@ -707,7 +720,6 @@ function managerCatalogCandidate(
     ...(manifest === undefined && entry.distribution === 'registry' && entry.archiveUrl && entry.packageDigest
       ? { updateRequiresValidation: true }
       : {}),
-    capabilities: manifest ? pluginManagerCapabilitiesFromManifest(manifest) : [],
     ...(manifest === undefined ? {} : { contributions: pluginManagerContributionsFromManifest(manifest) }),
   };
 }
@@ -759,80 +771,6 @@ export class OfficialPluginManagerCatalogAdapter implements PluginManagerCatalog
   }
 }
 
-function activeCapabilities(
-  pluginInstanceId: string,
-  broker: Awaited<ReturnType<FileHostBrokerStore['snapshot']>>,
-  now: number,
-): readonly string[] {
-  const liveLeaseIds = new Set(
-    broker.runtimeLeases
-      .filter((lease) => lease.pluginInstanceId === pluginInstanceId && lease.state === 'live' && lease.expiresAt > now)
-      .map((lease) => lease.runtimeLeaseId),
-  );
-  const active = broker.sessions.find(
-    (session) =>
-      session.pluginInstanceId === pluginInstanceId &&
-      session.phase === 'active' &&
-      liveLeaseIds.has(session.runtimeLeaseId),
-  );
-  return active?.effectiveGrants ?? [];
-}
-
-async function activeDeclaredMcpCapabilities(
-  pluginInstanceId: string,
-  inventory: PluginInventorySnapshot,
-  configured: CapabilitiesConfig | null,
-): Promise<readonly Capability[]> {
-  const instance = inventory.instances.find(
-    (candidate) => candidate.pluginInstanceId === pluginInstanceId && candidate.lifecycleState === 'installed',
-  );
-  const packageRecord = instance
-    ? inventory.packages.find(
-        (candidate) => candidate.packageDigest === instance.packageDigest && candidate.packageState === 'installed',
-      )
-    : undefined;
-  if (!packageRecord?.manifest) return [];
-  const activeContributionIds = new Set(
-    (configured?.capabilities ?? [])
-      .filter(
-        (capability) =>
-          capability.type === 'mcp' &&
-          capability.pluginId === packageRecord.pluginId &&
-          capability.enabled &&
-          capability.id.startsWith(`plugin:${packageRecord.pluginId}:`),
-      )
-      .map((capability) => capability.id.slice(`plugin:${packageRecord.pluginId}:`.length)),
-  );
-  if (activeContributionIds.size === 0) return [];
-
-  const capabilities = new Set<Capability>();
-  for (const feature of packageRecord.manifest.features) {
-    const references = feature.contributions ?? [];
-    if (
-      references.length > 0 &&
-      references.every((reference) => reference.type === 'mcp' && activeContributionIds.has(reference.id))
-    ) {
-      for (const capability of feature.capabilities) capabilities.add(capability);
-    }
-  }
-  return [...capabilities];
-}
-
-async function managerActiveCapabilities(
-  pluginInstanceId: string,
-  inventory: PluginInventorySnapshot,
-  broker: Awaited<ReturnType<FileHostBrokerStore['snapshot']>>,
-  now: number,
-  configured: CapabilitiesConfig | null,
-): Promise<readonly string[]> {
-  return [
-    ...new Set([
-      ...activeCapabilities(pluginInstanceId, broker, now),
-      ...(await activeDeclaredMcpCapabilities(pluginInstanceId, inventory, configured)),
-    ]),
-  ];
-}
-
 function inventoryCandidate(packageRecord: PluginInventorySnapshot['packages'][number]): PluginManagerCatalogCandidate {
   const provenance = packageRecord.provenance;
   const manifest = packageRecord.manifest;
@@ -848,40 +786,22 @@ function inventoryCandidate(packageRecord: PluginInventorySnapshot['packages'][n
     ...(manifest?.description === undefined ? {} : { description: manifest.description }),
     ...(manifestIcon(manifest ?? undefined) === undefined ? {} : { icon: manifestIcon(manifest ?? undefined) }),
     ownerAuthRequired: false,
-    capabilities: manifest ? pluginManagerCapabilitiesFromManifest(manifest) : [],
     contributions: manifest ? pluginManagerContributionsFromManifest(manifest) : [],
   };
 }
 
 /** Keeps every admitted current instance visible even when catalog discovery is offline. */
 export class InventoryPluginManagerInstalledPackages implements PluginManagerInstalledPackagesPort {
-  constructor(
-    private readonly inventory: FilePluginInventoryStore,
-    private readonly broker: FileHostBrokerStore,
-    private readonly mcpConfigIO: McpConfigIO,
-    private readonly now: () => number = Date.now,
-  ) {}
+  constructor(private readonly inventory: FilePluginInventoryStore) {}
 
   async list(): Promise<readonly PluginManagerDetail[]> {
-    const [inventory, broker, configured] = await Promise.all([
-      this.inventory.snapshot(),
-      this.broker.snapshot(),
-      this.mcpConfigIO.readConfig(),
-    ]);
+    const inventory = await this.inventory.snapshot();
     const plugins: PluginManagerDetail[] = [];
     for (const instance of inventory.instances.filter((candidate) => candidate.lifecycleState === 'installed')) {
       const packageRecord = inventory.packages.find((candidate) => candidate.packageDigest === instance.packageDigest);
       if (!packageRecord) continue;
       const candidate = inventoryCandidate(packageRecord);
-      const projected = projectPluginManagerCatalogCandidate(candidate, inventory, {
-        activeCapabilityIds: await managerActiveCapabilities(
-          instance.pluginInstanceId,
-          inventory,
-          broker,
-          this.now(),
-          configured,
-        ),
-      });
+      const projected = projectPluginManagerCatalogCandidate(candidate, inventory);
       plugins.push({
         ...projected,
         capabilities: projected.capabilitySummary.map((capability) => ({ ...capability })),
@@ -907,34 +827,6 @@ export class InventoryPluginManagerInstalledPackages implements PluginManagerIns
   }
 }
 
-class RuntimePluginManagerStateProjection implements PluginManagerStateProjectionPort {
-  constructor(
-    private readonly broker: FileHostBrokerStore,
-    private readonly mcpConfigIO: McpConfigIO,
-    private readonly now: () => number,
-    private readonly additionalStateProjection?: PluginManagerStateProjectionPort,
-  ) {}
-
-  async read(candidate: PluginManagerCatalogCandidate, inventory: PluginInventorySnapshot) {
-    const additional = await this.additionalStateProjection?.read(candidate, inventory);
-    if (additional && Object.keys(additional).length) return additional;
-    const instance = inventory.instances.find(
-      (item) => item.pluginId === candidate.pluginId && item.lifecycleState === 'installed',
-    );
-    if (!instance) return {};
-    const broker = await this.broker.snapshot();
-    const configured = await this.mcpConfigIO.readConfig();
-    const activeCapabilityIds = await managerActiveCapabilities(
-      instance.pluginInstanceId,
-      inventory,
-      broker,
-      this.now(),
-      configured,
-    );
-    return { activeCapabilityIds };
-  }
-}
-
 export interface PluginManagerRuntimeCompositionOptions {
   readonly additionalStateProjection?: PluginManagerStateProjectionPort;
   readonly runtime: DormantPluginRuntimeComposition;
@@ -942,7 +834,6 @@ export interface PluginManagerRuntimeCompositionOptions {
   /** Catalog authority used by the pre-Manager official routes during Train B compatibility. */
   readonly officialRouteCatalogProvider?: OfficialPluginCatalogProvider;
   readonly catalogManifests: readonly unknown[];
-  readonly localGrantPolicy?: (manifest: PluginManifest) => Promise<readonly Capability[]> | readonly Capability[];
   readonly fetchOfficialArchive?: (entry: OfficialPluginCatalogEntry) => Promise<Uint8Array>;
   readonly prepareDesktopComponent?: () => Promise<void>;
   readonly now?: () => number;
@@ -1015,7 +906,6 @@ export function createPluginManagerRuntimeComposition(
     lifecycle: options.runtime.lifecycle,
     reconcileConfiguration: (pluginId, instanceId) => configuration.reconcile(pluginId, instanceId),
     packagesRoot: options.runtime.paths.packagesRoot,
-    grantPolicy: options.localGrantPolicy ?? (() => []),
     ...(options.runtime.contract === undefined ? {} : { validateManifest: options.runtime.contract.validateManifest }),
     quarantine: quarantines,
   });
@@ -1050,18 +940,7 @@ export function createPluginManagerRuntimeComposition(
     ...(options.runtime.contract === undefined ? {} : { validateManifest: options.runtime.contract.validateManifest }),
   });
 
-  const installedPackages = new InventoryPluginManagerInstalledPackages(
-    options.runtime.inventoryStore,
-    options.runtime.brokerStore,
-    options.runtime.mcpConfigIO,
-    now,
-  );
-  const stateProjection = new RuntimePluginManagerStateProjection(
-    options.runtime.brokerStore,
-    options.runtime.mcpConfigIO,
-    now,
-    options.additionalStateProjection,
-  );
+  const installedPackages = new InventoryPluginManagerInstalledPackages(options.runtime.inventoryStore);
   const configuration = new HostPluginConfigurationService({
     packages: options.runtime.packages,
     lifecycle: options.runtime.lifecycle,
@@ -1073,14 +952,14 @@ export function createPluginManagerRuntimeComposition(
     catalog,
     inventory: options.runtime.inventoryStore,
     installedPackages,
-    stateProjection,
+    ...(options.additionalStateProjection ? { stateProjection: options.additionalStateProjection } : {}),
     configuration,
     quarantine: new PluginPackageQuarantineManagerAdapter(quarantines),
     installer: {
       install: async ({ request, candidate }) => {
         if ('expectedVersion' in request) {
           if (!candidate) throw new PluginManagerServiceError('PLUGIN_NOT_FOUND', 'Catalog plugin is unavailable');
-          // Capture current identity/grants before preparation; all sources share the same fenced rollback.
+          // Capture current identity and lifecycle before preparation; all sources share the same fenced rollback.
           const inventoryAtRequest = await options.runtime.inventoryStore.snapshot();
           const installed = await officialInstaller.install(
             request.source.catalogId,

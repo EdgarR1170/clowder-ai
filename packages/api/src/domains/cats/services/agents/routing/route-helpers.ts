@@ -37,6 +37,7 @@ import { estimateTokens } from '../../../../../utils/token-counter.js';
 import { matchExplicitApprovedTasteTrigger } from '../../../../memory/cue/ExplicitApprovedTasteTriggerCatalog.js';
 import type { MemoryCueOpportunitySeed } from '../../../../memory/cue/MemoryCueInvocationPromptService.js';
 import type { NudgeProcessResult } from '../../../../memory/EntityNudgeService.js';
+import { formatRoadmapPointer, readNavigationRoadmap } from '../../../../workspace/thread-roadmap-source.js';
 import type { CloudDispatchProvenance } from '../../cloud-bridge/types.js';
 import { buildMessageMap, formatMessage } from '../../context/ContextAssembler.js';
 import { CO_CREATOR_TIME_ZONE, formatPromptTime } from '../../format-time.js';
@@ -126,6 +127,7 @@ export interface RouteBroadcaster {
 
 /** Dependencies shared across route strategies */
 export interface RouteStrategyDeps {
+  messageSearchAnswerService?: import('../../../../memory/MessageSearchAnswerPublicationService.js').MessageSearchAnswerPublicationService;
   routingDispatchPreflight?: import('../../../../routing-context/RoutingDispatchPreflightPort.js').RoutingDispatchPreflightPort;
   services: Record<string, AgentService>;
   unavailableServices?: ReadonlyMap<string, AgentRegistrationFailure>;
@@ -1998,9 +2000,15 @@ async function assembleIncrementalContextInternal(
       };
     }
   }
+  const roadmap =
+    threadStore && options?.contextProjection?.contextMode !== 'hot'
+      ? await readNavigationRoadmap(threadStore, userId, threadId)
+      : undefined;
   const navigationHeader = formatNavigationHeader({
     threadId,
     currentCatId: catId,
+    recentWorkDirectory: Boolean(threadStore) && options?.contextProjection?.contextMode !== 'hot',
+    ...(roadmap ? { roadmapPointer: formatRoadmapPointer(roadmap) } : {}),
     baton,
     tasks: activeTasks,
     ...(executionSituation ? { executionSituation } : {}),

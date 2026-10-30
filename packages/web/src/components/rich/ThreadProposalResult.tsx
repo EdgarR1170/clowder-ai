@@ -1,8 +1,9 @@
-import { type ReactNode, useRef, useState } from 'react';
+import { type ReactNode, useContext, useRef, useState } from 'react';
 import { useShellCopy } from '@/components/shell/shell-copy';
 import { useShellLanguage } from '@/components/shell/shell-language';
 import { pushThreadRouteWithHistory } from '@/components/ThreadSidebar/thread-navigation';
 import { ApprovalResultRow, type DecisionResultStatus } from './ApprovalResultRow';
+import { ApprovalResultHistory } from './approval-result-history';
 import { decisionResultCopy } from './decision-result.shell-copy';
 import { proposalResultCopy } from './proposal-result.shell-copy';
 
@@ -22,6 +23,8 @@ export function ThreadProposalResult({
   threadId,
   openLocked = false,
   effectUnknown = false,
+  effectFailed = false,
+  effectInProgress = false,
   authorizeOpen,
   children,
   onExpandedChange,
@@ -34,6 +37,8 @@ export function ThreadProposalResult({
   threadId?: string | null;
   openLocked?: boolean;
   effectUnknown?: boolean;
+  effectFailed?: boolean;
+  effectInProgress?: boolean;
   authorizeOpen?: () => boolean;
   children: ReactNode;
   onExpandedChange?: (expanded: boolean) => void;
@@ -44,21 +49,36 @@ export function ThreadProposalResult({
   const t = useShellCopy(proposalResultCopy);
   const resultCopy = useShellCopy(decisionResultCopy);
   const language = useShellLanguage();
+  const history = useContext(ApprovalResultHistory);
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
-  const time = resultTime(decidedAt, language);
+  const time = history ? null : resultTime(decidedAt, language);
   const label = superseded
     ? t.superseded
     : status === 'approved'
-      ? [t.approved, effectUnknown ? t.effectUnknown : threadId ? t.opened : null].filter(Boolean).join(' · ')
+      ? [
+          t.approved,
+          effectFailed
+            ? t.failed
+            : effectInProgress
+              ? t.inProgress
+              : effectUnknown
+                ? t.effectUnknown
+                : threadId
+                  ? t.opened
+                  : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
       : [status === 'rejected' ? t.declined : resultCopy[status], time].filter(Boolean).join(' · ');
   return (
-    <div data-testid="thread-proposal-result">
+    <div data-testid="thread-proposal-result" style={effectFailed ? { color: 'var(--semantic-warning)' } : undefined}>
       <ApprovalResultRow
         status={status}
         label={label}
         testIdPrefix="proposal-result"
         onExpandedChange={onExpandedChange}
+        warning={effectFailed}
         actions={
           superseded ? (
             replacementAction
@@ -90,7 +110,7 @@ export function ThreadProposalResult({
                   }
                 }}
               >
-                {t.open}
+                {effectFailed ? t.retry : t.open}
               </button>
             </>
           ) : null

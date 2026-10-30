@@ -9,21 +9,23 @@ async function notify(notice) {
   await recordSecretExposure(notice);
 }
 
-function postToolUseOutput(toolName, result) {
-  const isMcp = /mcp/i.test(toolName ?? '');
+function postToolUseOutput(result) {
   const noticeFailed = result._meta.secretExposure.rotationNotice === 'failed';
   const context = result.content.slice(noticeFailed ? -2 : -1).map((part) => part.text);
-  if (!isMcp)
-    context[0] = `原生工具结果含疑似凭据，已进入模型上下文，无法隐藏；请轮转相关凭据。原线程轮转提醒${noticeFailed ? '未能保存，请保留本结果并处理' : '已持久保存'}。`;
-  return {
-    hookEventName: 'PostToolUse',
-    additionalContext: context.join('\n'),
-    ...(isMcp ? { updatedMCPToolOutput: result } : {}),
-  };
+  const summary = '原生工具结果包含当前已配置的凭据值，可能已被原生提供方消费，无法撤回；请按原授权轮转对应凭据。';
+  context[0] = `${summary}核验记录${noticeFailed ? '未能保存' : '已持久保存'}。`;
+  return { hookEventName: 'PostToolUse', additionalContext: context.join('\n') };
 }
 
 /** Native post hooks are exposure detection; they cannot undo provider-side consumption. */
 export async function secretNativeHook(payload, options = {}) {
+  if (
+    typeof payload?.tool_name === 'string' &&
+    !['bash', 'shell', 'exec_command', 'shell_command', 'run_command', 'run_terminal_cmd', 'execute_command'].includes(
+      payload.tool_name.toLowerCase(),
+    )
+  )
+    return null;
   if (!payload || (typeof payload.tool_name !== 'string' && payload.hook_event_name !== 'PostToolUse'))
     return denied('secret_hook_payload_invalid');
   if (payload?.hook_event_name !== 'PostToolUse') {
@@ -37,10 +39,12 @@ export async function secretNativeHook(payload, options = {}) {
   const result = await protectSecretToolResult(original, {
     callId: payload.tool_use_id ?? payload.tool_call_id,
     notify: options.notify ?? notify,
+    environment: options.environment,
+    knownCredentials: options.knownCredentials,
   });
   if (result === original) return null;
   return {
-    hookSpecificOutput: postToolUseOutput(payload.tool_name, result),
+    hookSpecificOutput: postToolUseOutput(result),
   };
 }
 

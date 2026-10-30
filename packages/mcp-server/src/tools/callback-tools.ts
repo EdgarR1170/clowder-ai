@@ -1,5 +1,10 @@
-import { deploymentDefaults } from '@cat-cafe/shared';
+import {
+  deploymentDefaults,
+  type MessageSearchAnswerAttachmentRequest,
+  messageSearchAnswerAttachmentSchema,
+} from '@cat-cafe/shared';
 import { defineMcpCanonicalFactory, defineMcpMigrationFactory } from '../tool-governance-migration.js';
+import { invocationFetch } from './invocation-auth.js';
 
 /**
  * MCP Callback Tools — core callbacks
@@ -324,7 +329,7 @@ export async function callbackGet(
         response.status === 401 ? extractReasonTag(response.body) : '',
       );
     }
-    const response = await fetch(url, { headers: buildAuthHeaders(config) });
+    const response = await invocationFetch(url, { headers: buildAuthHeaders(config) });
     if (!response.ok) {
       const text = await response.text();
       // F174 Phase A: tag structured reason from 401 callback_auth_failed body
@@ -365,6 +370,11 @@ const IMPLEMENTATION_REVIEW_ANCHOR_ERROR =
 const postMessageThreadIdSchema = z.string().min(1);
 
 export const postMessageInputSchema = {
+  searchAnswer: messageSearchAnswerAttachmentSchema
+    .optional()
+    .describe(
+      'Prepared server-owned answer reference. Requires stable clientMessageId. For forwarding an actual bound card, add source={messageId,blockId}; the Host re-admits it for this destination.',
+    ),
   content: z.string().min(1).describe('The message content to post'),
   effectClass: z
     .enum(['fyi', 'coordinate', 'investigate'])
@@ -598,7 +608,23 @@ export const listThreadsInputSchema = {
     .min(1)
     .max(200)
     .optional()
-    .describe('Optional: filter threads whose title or threadId contains this keyword (case-insensitive).'),
+    .describe(
+      'Case-insensitive title filter. Work mode also accepts an exact complete thread_ ID; default mode retains title/threadId substring matching.',
+    ),
+  includeWork: z
+    .boolean()
+    .optional()
+    .describe(
+      'Include up to 3 unfinished Task pointers and lifecycle-backed running members per visible thread; page cap 20, 24k characters. Default false.',
+    ),
+  cursor: z
+    .string()
+    .min(1)
+    .max(2000)
+    .optional()
+    .describe(
+      'Opaque nextCursor from includeWork=true; reuse the same activeSince/keyword filters. Live pages are not a frozen snapshot.',
+    ),
   agentKeyCatId: agentKeyCatIdSchema,
 };
 
@@ -690,6 +716,7 @@ export const createTaskInputSchema = {
 
 export const updateTaskInputSchema = {
   taskId: z.string().min(1).describe('The ID of the task to update'),
+  expectedOwnerRevision: z.number().int().nonnegative().optional(),
   status: z
     .enum(['todo', 'doing', 'blocked', 'done'])
     .optional()
@@ -953,6 +980,7 @@ function containsPawFeelMarker(content: string): boolean {
 async function _executePostMessage(
   input: {
     content: string;
+    searchAnswer?: MessageSearchAnswerAttachmentRequest;
     contextAttachments?: ContextAttachment[] | undefined;
     threadId?: string | undefined;
     replyTo?: string | undefined;
@@ -973,6 +1001,8 @@ async function _executePostMessage(
   },
   transportOptions?: CallbackTransportOptions,
 ): Promise<ToolResult> {
+  if (input.searchAnswer && !input.clientMessageId)
+    return errorResult('searchAnswer requires a stable clientMessageId; retry that ID without searching again.');
   if (input.localReviewVerdict) {
     if (!input.clientMessageId) {
       return errorResult(
@@ -1012,6 +1042,7 @@ async function _executePostMessage(
         '/api/callbacks/post-message',
         {
           content: input.content,
+          ...(input.searchAnswer ? { searchAnswer: input.searchAnswer } : {}),
           ...(input.contextAttachments?.length ? { contextAttachments: input.contextAttachments } : {}),
           ...(input.threadId ? { threadId: input.threadId } : {}),
           ...(input.replyTo ? { replyTo: input.replyTo } : {}),
@@ -1125,6 +1156,7 @@ async function _executePostMessage(
 export async function handlePostMessage(
   input: {
     content: string;
+    searchAnswer?: MessageSearchAnswerAttachmentRequest;
     contextAttachments?: ContextAttachment[] | undefined;
     threadId?: string | undefined;
     replyTo?: string | undefined;
@@ -1282,6 +1314,8 @@ export async function handleListThreads(input: {
   limit?: number | undefined;
   activeSince?: number | undefined;
   keyword?: string | undefined;
+  includeWork?: boolean | undefined;
+  cursor?: string | undefined;
   agentKeyCatId?: string | undefined;
 }): Promise<ToolResult> {
   return callbackGet(
@@ -1290,6 +1324,8 @@ export async function handleListThreads(input: {
       ...(input.limit ? { limit: String(input.limit) } : {}),
       ...(input.activeSince !== undefined ? { activeSince: String(input.activeSince) } : {}),
       ...(input.keyword ? { keyword: input.keyword } : {}),
+      ...(input.includeWork !== undefined ? { includeWork: String(input.includeWork) } : {}),
+      ...(input.cursor ? { cursor: input.cursor } : {}),
     },
     { agentKeyCatId: input.agentKeyCatId },
   );
@@ -1376,6 +1412,7 @@ function formatFeatIndexResponse(raw: string): string {
 
 export async function handleUpdateTask(input: {
   taskId: string;
+  expectedOwnerRevision?: number;
   status?: string | undefined;
   why?: string | undefined;
   agentKeyCatId?: string | undefined;
@@ -1395,6 +1432,7 @@ export async function handleUpdateTask(input: {
         '/api/callbacks/update-task',
         {
           taskId: input.taskId,
+          ...(input.expectedOwnerRevision !== undefined ? { expectedOwnerRevision: input.expectedOwnerRevision } : {}),
           ...(input.status ? { status: input.status } : {}),
           ...(input.why ? { why: input.why } : {}),
           // F193-E1 P1-4: allow patching dispatchGate on existing tasks
@@ -1607,6 +1645,7 @@ export async function handleCreateTask(input: {
 export async function handleCrossPostMessage(input: {
   threadId: string;
   content: string;
+  searchAnswer?: MessageSearchAnswerAttachmentRequest;
   targetCats?: string[] | undefined;
   replyTo?: string | undefined;
   clientMessageId?: string | undefined;
@@ -1715,6 +1754,7 @@ export async function handleCrossPostMessage(input: {
   return _executePostMessage({
     threadId: input.threadId,
     content: input.content,
+    ...(input.searchAnswer ? { searchAnswer: input.searchAnswer } : {}),
     ...(input.replyTo ? { replyTo: input.replyTo } : {}),
     ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
     ...(input.agentKeyCatId ? { agentKeyCatId: input.agentKeyCatId } : {}),
@@ -3406,7 +3446,30 @@ export async function handleGetThreadMetadata(input: AgentKeySelectable = {}): P
 }
 
 export const setThreadMetadataInputSchema = {
-  // Protected migration schema stays stable; the tool-level contract below governs title writes.
+  roadmap: z
+    .discriminatedUnion('state', [
+      z
+        .object({
+          state: z.literal('active'),
+          projectPath: z.string().min(1).max(1000),
+          path: z.string().min(1).max(1000),
+          sourceRef: z.string().min(1).max(500),
+          expectedRevision: z.number().int().positive().nullable(),
+        })
+        .strict(),
+      z
+        .object({
+          state: z.literal('revoked'),
+          sourceRef: z.string().min(1).max(500),
+          expectedRevision: z.number().int().positive(),
+        })
+        .strict(),
+    ])
+    .optional()
+    .describe(
+      'Bind one original work-line roadmap in this thread, or retain a revocation tombstone. Active: existing project root + repository-relative Markdown path. sourceRef=thread:<currentThreadId>#<messageId> must be readable here. expectedRevision=null for first bind; otherwise use roadmapBinding.revision from get_thread_metadata. Server normalizes disposable worktrees to a persistent root and derives actor/time/version; a pointer grants no read or work authority.',
+    ),
+  // Keep the legacy title hint; the server and tool-level contract govern protected title writes.
   title: z.string().min(1).optional().describe('Update thread title (replaces existing)'),
   labels: z.array(z.string()).optional().describe('Update thread labels (replaces entire array)'),
   worktrees: z.array(z.string()).optional().describe('Worktree paths to add (append + dedupe)'),
@@ -3436,6 +3499,7 @@ export const setThreadMetadataInputSchema = {
 };
 
 export async function handleSetThreadMetadata(input: {
+  roadmap?: z.infer<typeof setThreadMetadataInputSchema.roadmap>;
   title?: string;
   labels?: string[];
   worktrees?: string[];
@@ -3455,6 +3519,7 @@ export async function handleSetThreadMetadata(input: {
       callbackPost(
         '/api/callbacks/set-thread-metadata',
         {
+          ...(input.roadmap !== undefined ? { roadmap: input.roadmap } : {}),
           ...(input.title !== undefined ? { title: input.title } : {}),
           ...(input.labels !== undefined ? { labels: input.labels } : {}),
           ...(input.worktrees !== undefined ? { worktrees: input.worktrees } : {}),
@@ -3503,12 +3568,12 @@ export const callbackTools = [
       "The receipt acknowledges submission, not the recipient's answer; wait for an inbound reply before claiming their result. " +
       'GOTCHA: use one delivery carrier per intended hop. After a successful routed post, repeating the same line-start @mention in final text creates another hop; use that text fallback when the post failed. ' +
       'Scarce dossier engagementPolicy seats receive effectClass=fyi or coordination.phase=terminal unread without waking; deliveredWithoutWake confirms delivery, not reading. Active coordination, actions and localReviewVerdict retain their wake. ' +
-      'GOTCHA: action is Task-backed implement work: subjectRef=subject:task:<taskId>, terminalPredicate={kind:"task_done"}, explicit clientMessageId and exactly one targetCats entry. Ordinary existing-owner notifications need no action; removing action does not authorize new work. ' +
+      'GOTCHA: action is Task-backed implement work: subjectRef=subject:task:<taskId>, terminalPredicate={kind:"task_done"}, explicit clientMessageId and exactly one targetCats entry. For ordinary work (work Task, no namespaced subject or entrusted contract), send expectedOwnerRevision from list_tasks and optionally stopPreviousExecution; the server reuses Task/Message/Queue, reports queueing separately from execution, and never requires lease replacement or another approval for the same authorized work. Ordinary existing-owner notifications need no action; removing action does not authorize new work. ' +
       'For a direct Claim/Release chain, pass coordination.phase=active on work hops and terminal on the final delivery; terminal recipients may clean-stop without another @. ' +
       'An unaddressed terminal transition whose id or bound subject conflicts with the incoming coordination fails with HTTP 409 before persistence. After an incoming terminal, any authored target is genuinely new active work even if the caller repeats a stale terminal label. ' +
       'A reply after terminal is a quiet courtesy ACK only when it has no explicit routing credential; line-start @mentions and structured targetCats always start a new active routing generation and remain subject to the normal loop-streak guard. ' +
       'For a local review result, route an ordinary @author message with localReviewVerdict + exact reviewedHeadSha + reviewSubjectRef + acceptedSourceRef + acceptedRevision + clientMessageId. This durable fact needs no action lease, coordination generation, replacement, or issuer route. Public prose is never parsed. ' +
-      'Existing standing uses claimOrigin="existing_standing" + groundingEvidenceRef; rejected custody uses returnToPredecessor and targets the persisted predecessor. ' +
+      'Governed lease work alone uses existing_standing + groundingEvidenceRef or returnToPredecessor. Ordinary Task handoff uses the current assignment revision; its original home, source, approvals and WIP remain canonical. ' +
       'GOTCHA: structured action metadata currently requires invocation-token auth; agent-key callers fail closed with the non-retryable action_agent_key_unsupported status and never send an unfenced fallback. ' +
       'F247: gpt-pro agent-key returns copy only replyTo=sourceMessageId from the runtime delta; the server admits it only when an exact server-custodied dispatch grant exists. ' +
       'A post_message is always its own durable message, separate from your final reply. ' +
@@ -3680,12 +3745,16 @@ export const callbackTools = [
       runtimeProfiles: ['full', 'agent-key', 'desktop:cloud-pro-phase0', 'desktop:live-companion'],
     },
   }),
-  defineTool({
+  defineCanonicalTool({
     name: 'cat_cafe_list_threads',
     description:
-      'List thread summaries for discovery. Use when you need to find a thread by keyword or see recent activity. ' +
-      'Returns thread IDs, titles, and activity timestamps. ' +
-      'Use activeSince (Unix ms) to filter to recently active threads. Use keyword to search by title.',
+      'Discover visible threads and recent work without reading conversation bodies. ' +
+      'Use when: finding a work line such as “那个3D建模” or “最近在忙什么”; set includeWork=true for titles, up to 3 unfinished Tasks, and actual running members. ' +
+      'NOT for: resuming authorization or reading full progress (follow the returned thread/Task pointers), or all-project execution counts (get_running_work is Host-project scoped). ' +
+      'Output: thread IDs, titles, activity times; work mode adds project identity, per-source availability, bounded live pages and nextCursor. A bound original roadmap appears directly on the entry with file version/as-of, exact read pointer and later-activity-needs-checking. ' +
+      'GOTCHA: Task/project details require the original list_tasks invocation authority; other callers retain title pointers only. ' +
+      'Doing does not prove execution. Execution none covers the home thread and visible dispatchGate targets; dispatchedThreadId is a routing target, not proof of execution location. Entrusted work with no canonical execution link remains unknown even when dispatched. ' +
+      'Task and roadmap reads also respect the invocation callback allowlist. Partial Task scans cannot claim globally latest Tasks. A later timestamp does not make original decisions obsolete. Discovery grants no file or work authority.',
     inputSchema: listThreadsInputSchema,
     handler: handleListThreads,
     governance: {
@@ -3747,19 +3816,19 @@ export const callbackTools = [
       'For scarce dossier engagementPolicy seats, effectClass=fyi or coordination.phase=terminal persists unread without waking; receipt deliveredWithoutWake means delivered, not read. Active coordination, actions, assign_work approval and localReviewVerdict retain their normal routing. ' +
       'Messages without routing (no targetCats, no line-start @) will be REJECTED (F193 AC-A4). ' +
       'GOTCHA: Requires threadId — use feat_index/list_threads plus thread truth to verify the exact owning thread; never guess a nearby thread. ' +
-      'PAW-FEEL: The original [爪感差: ...] message is already collected. Cross-post only a marker-free sourceMessageId reference to a verified owner; if none exists, use cat_cafe_propose_thread (F128). New responsibility uses effectClass=assign_work plus proposedAction for Approval Hub review. ' +
+      'PAW-FEEL: The original [爪感差: ...] message is already collected. Cross-post only a marker-free sourceMessageId reference to a verified owner; if none exists, use cat_cafe_propose_thread (F128). A genuinely new authorization uses effectClass=assign_work plus proposedAction for Approval Hub review; the same already-authorized ordinary Task uses its native handoff and creates no second card. ' +
       'GOTCHA: For Claim/Release coordination, pass coordination.phase=active on Claim/work hops and terminal on Release. ' +
       'An unaddressed terminal transition whose id or bound subject conflicts with the incoming coordination fails with HTTP 409 before persistence. Cross-thread routing credentials after an incoming terminal always name genuinely new active work. ' +
       'For a local review result, route one ordinary @author cross-post with localReviewVerdict + exact reviewedHeadSha + reviewSubjectRef + acceptedSourceRef + acceptedRevision + clientMessageId. This durable fact needs no action lease, coordination generation, replacement, or issuer route; prose is never parsed. ' +
       'The server carries a stable id across active hops. Every cross-thread post supplies an explicit routing credential, so a line-start @mention or structured targetCats after terminal always starts a new active routing generation and remains subject to the normal loop-streak guard. ' +
       'If terminal reveals genuinely new work, start a new coordination with phase=active instead of ACKing the closed chain. ' +
       'GOTCHA: direct action is Task-backed implement work: subjectRef=subject:task:<taskId> and terminalPredicate={kind:"task_done"}, plus clientMessageId and targetCats. An asset ID or reuse of an old thread does not grant delegate standing. For operator-gated new responsibility, pass proposedAction with effectClass=assign_work; both paths require the actual Task. Ordinary existing-owner notifications omit action, but cannot bypass an implementation refusal. ' +
-      'Output: direct action admission posts and queues one fenced carrier; assign_work publishes one pending approval card and posts nothing to the target until approval atomically acquires the fence. ' +
+      'Output: ordinary Task handoff conditionally updates the original assignment and queues one durable source; it waits for exact previous-provider teardown before starting another writer. Replays reuse that source. Pass expectedOwnerRevision; stopPreviousExecution requests exact cancellation, not fabricated stop proof. Retained assign_work+proposedAction for that same authorized Task follows this path with no new approval card. Missing Task standing or a mismatched child is rejected, without opening a card. Cross-thread assign_work outside this native Task path still requires the existing pending approval proposal. ' +
       'Existing standing reuses the same CAS via claimOrigin="existing_standing" + groundingEvidenceRef. returnToPredecessor sends a rejected single generation to the server-persisted predecessor; parallel mode records only the rejecting holder terminal. ' +
       'For a canonical Task-owner replacement of an initial terminal delegate in the same approved child, groundingEvidenceRef must be the exact direct-human message:<id>; server validation binds user, child, revision, and timing, and never turns prose alone into a grant. ' +
       'Structured action metadata currently requires invocation-token auth; agent-key callers fail closed with the non-retryable action_agent_key_unsupported status and never send an unfenced fallback. ' +
       'F247: gpt-pro agent-key returns carry only the exact replyTo from the runtime delta; authorization stays in server custody. ' +
-      'Fallback must use replace with the active leaseId/generation after server-recorded terminal evidence. Use mode=parallel + parallelIntent only for deliberate independent review, #ideate, or explicit operator fan-out. ' +
+      'Only surviving governed lease work uses replace with leaseId/generation after server-recorded terminal evidence. Ordinary Task implementation uses expectedOwnerRevision and existing execution control. Use mode=parallel + parallelIntent only for deliberate independent review, #ideate, or explicit operator fan-out. ' +
       'TIP: The sub-thread "## 主 Thread" header includes exact routing credentials (threadId + targetCats/handle) — copy them directly.',
     inputSchema: crossPostMessageInputSchema,
     handler: handleCrossPostMessage,
@@ -3853,9 +3922,9 @@ export const callbackTools = [
   defineCanonicalTool({
     name: 'cat_cafe_update_task',
     description:
-      'Update a task you own: mark as doing/blocked/done, or resolve a missing dispatch gate. ' +
+      'Update a task you own, or pick up an unassigned ordinary Task in your home thread by marking it doing; also resolve a missing dispatch gate. ' +
       'Entrusted work cannot be marked done through this generic tool; use its typed, evidence-backed closure action. ' +
-      'GOTCHA: You can only update tasks assigned to you (your catId). ' +
+      'Output: the canonical Task update is returned; picking up an unassigned Task assigns its owner and binds the current authenticated execution atomically. Ordinary completion never waits for a lease mirror. GOTCHA: assigned ordinary work requires the current owner or exact admitted delegate execution; include expectedOwnerRevision from the Task read. Stale assignment, source withdrawal or a different live writer is rejected. A later owner invocation recovers a stranded binding only with exact positive provider-stop evidence. Entrusted/typed closure and namespaced producers retain their own contracts. ' +
       'TIP: Include a "why" note when marking as blocked — it helps others understand the situation. ' +
       'F193-E1: Pass dispatchGate to resolve a "missing" dispatch gate (e.g. after cross_posting to the owning thread).',
     inputSchema: updateTaskInputSchema,
@@ -4291,7 +4360,7 @@ export const callbackTools = [
       'Use when: L0 shows the profile URI, you are starting a session and need relationship or owner context, or you need to verify the currently effective content before proposing an update. ' +
       'NOT for: searching project knowledge or old threads (use search_evidence), reading arbitrary workspace files (use read_file_slice), or reading another user/cat/persona. ' +
       'Output: the current content + revision (sha256 hash); expectedRevision rejects changed snapshots without returning content. Read-only, no profile change. ' +
-      'GOTCHA: for a runtime invocation, use the Clowder AI MCP bound to that invocation; a separately installed App with the same tool name is not a substitute. A missing profile on another connection does not establish absence here. The primer is approved current context, not proof of a historical first occurrence. For original message coordinates use cat_cafe_get_message(mode="full", messageId=the bare ID after #), not graph_resolve. A revision mismatch requires a fresh read. An unavailable current layer is not permission to reconstruct a current agreement from old messages; describe history as history instead. Identity comes from authentication, never userId, catId, path or relationshipKey input.',
+      `GOTCHA: for a runtime invocation, use the ${deploymentDefaults.brand.displayName} MCP bound to that invocation; a separately installed App with the same tool name is not a substitute. A missing profile on another connection does not establish absence here. The primer is approved current context, not proof of a historical first occurrence. For original message coordinates use cat_cafe_get_message(mode="full", messageId=the bare ID after #), not graph_resolve. A revision mismatch requires a fresh read. An unavailable current layer is not permission to reconstruct a current agreement from old messages; describe history as history instead. Identity comes from authentication, never userId, catId, path or relationshipKey input.`,
     inputSchema: readProfileInputSchema,
     handler: handleReadProfile,
     governance: {
@@ -4760,14 +4829,14 @@ export const callbackTools = [
       runtimeProfiles: ['full'],
     },
   }),
-  defineTool({
+  defineCanonicalTool({
     name: 'cat_cafe_set_thread_metadata',
     description:
       'Write low-frequency metadata anchors for the current thread. Merge semantics: ' +
       'title names an untitled conversation once; labels REPLACE; worktrees/prs/issues/features APPEND with dedupe (use remove* fields to remove); ' +
-      'notes MERGE (string sets, null deletes key). ' +
-      'Use when: naming an untitled conversation or recording a worktree, PR, or issue association. NOT for: renaming an already named conversation or dynamic state. ' +
-      'Output: updated metadata; title requests include titleApplied and titleSource. If titleApplied=false, report that the title was not changed. ' +
+      'notes MERGE (string sets, null deletes key). roadmap binds one original file or records a revocation tombstone, with expectedRevision concurrency protection. ' +
+      'Use when: naming an untitled conversation, recording an association, or explicitly choosing/revoking the original roadmap for a long work line. NOT for: renaming an already named conversation, taking over a Task or storing derived progress. ' +
+      'Output: updated metadata; roadmapBinding returns normalized persistent coordinates and revision, roadmap returns current file/version/as-of or revoked/invalid/unavailable. Later activity means needs checking, never automatically obsolete. File readers retain their own access checks. Title requests include titleApplied and titleSource. If titleApplied=false, report that the title was not changed. ' +
       'SCOPE: current thread only (no threadId param); cross-thread writes are impossible. ' +
       'GOTCHA: the legacy title parameter hint does not authorize replacement. User and previously cat-named titles are protected; check titleApplied.',
     inputSchema: setThreadMetadataInputSchema,

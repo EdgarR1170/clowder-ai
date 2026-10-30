@@ -7,7 +7,7 @@ import { OfficialPluginPackageInstaller } from '../src/domains/plugin/official-p
 import { createDormantPluginRuntimeComposition } from '../src/domains/plugin/runtime-composition.js';
 import { desktopWindowFixture } from './f317-window.fixture.js';
 
-type Fault = 'lease-expired' | 'grant-changed' | 'snapshot-io' | 'seal-missing' | 'observation-expired';
+type Fault = 'lease-expired' | 'snapshot-io' | 'seal-missing' | 'observation-expired';
 
 async function failedObservation(t: TestContext, fault: Fault) {
   const f = await desktopWindowFixture();
@@ -17,6 +17,7 @@ async function failedObservation(t: TestContext, fault: Fault) {
   let releases = 0;
   let root = '';
   let failSnapshot = false;
+  let publicationReady = false;
   const failures: DesktopWindowFailure[] = [];
   const runtime = createDormantPluginRuntimeComposition({
     projectRoot: f.root,
@@ -59,7 +60,7 @@ async function failedObservation(t: TestContext, fault: Fault) {
         await (pkg.verifyStaticIntegrity?.() ?? pkg.verifyIntegrity());
         if (polls === 2 && fault === 'observation-expired') {
           await new Promise((resolve) => setTimeout(resolve, 30));
-          now += 15_001;
+          publicationReady = true;
         }
       },
       release: async () => {
@@ -68,6 +69,17 @@ async function failedObservation(t: TestContext, fault: Fault) {
       },
     };
   };
+  const transaction = runtime.brokerStore.transaction.bind(runtime.brokerStore);
+  runtime.brokerStore.transaction = (work) =>
+    transaction(async (tx) => {
+      if (publicationReady) {
+        // Keep the final stale-publication outlet after the last allowed refresh.
+        // Preparation itself can now obtain a new genuine native sample.
+        publicationReady = false;
+        now += 15_001;
+      }
+      return work(tx);
+    });
   const snapshot = runtime.brokerStore.snapshot.bind(runtime.brokerStore);
   runtime.brokerStore.snapshot = async () => {
     if (failSnapshot) {
@@ -81,15 +93,6 @@ async function failedObservation(t: TestContext, fault: Fault) {
     const expiry = await renew(connectionId);
     if (polls === 2) {
       if (fault === 'snapshot-io') failSnapshot = true;
-      if (fault === 'grant-changed') {
-        await runtime.inventoryStore.transaction((tx) => {
-          const session = awaitSnapshot.sessions.find((row) => row.connectionId === connectionId);
-          assert.ok(session);
-          const grants = tx.grants.get(session.pluginInstanceId);
-          assert.ok(grants);
-          tx.grants.put({ ...grants, grantRevision: grants.grantRevision + 1, effectiveGrants: [] });
-        });
-      }
     }
     return expiry;
   };
@@ -135,7 +138,6 @@ async function failedObservation(t: TestContext, fault: Fault) {
 
 const cases = [
   ['lease-expired', 'lease-renew', 'lease-renew', 'SESSION_NOT_ACTIVE'],
-  ['grant-changed', 'authority', 'authority-check', 'AUTHORITY_CHANGED'],
   ['snapshot-io', 'authority', 'feature-snapshot', 'EIO'],
   ['seal-missing', 'authority', 'package-verification', 'ENOENT'],
   ['observation-expired', 'authority', 'observation-publish', undefined],
@@ -156,7 +158,7 @@ for (const [fault, phase, stage, code] of cases) {
     const origin = stages.find((entry) => entry.stage === stage);
     assert.equal(origin?.status, 'failed', `the original ${stage} failure must not be flattened to poll-failed`);
     assert.equal(origin?.error?.code, code);
-    assert.ok(stages.length <= 9);
+    assert.ok(stages.length <= 10);
     assert.ok(stages.every((entry) => Number.isFinite(entry.elapsedMs) && entry.elapsedMs >= 0));
     if (fault === 'lease-expired') assert.equal(observation.error.sessionCloseReason, 'runtime_lease_expired');
     if (fault === 'observation-expired') {

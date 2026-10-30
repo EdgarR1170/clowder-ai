@@ -2,6 +2,7 @@ import type { RoutingPreflightDecisionV1 } from '@cat-cafe/shared';
 import { InvocationServiceScope } from '../invocation/invocation-service-scope.js';
 import { isRoutingOwnerAttempt } from './routing-owner-attempt.js';
 import { routingPreflightNotice } from './routing-preflight-notice.js';
+import { persistStartupRecovery } from './startup-recovery-projection.js';
 /**
  * Serial Route Strategy
  * Cats respond one by one, each seeing previous responses.
@@ -1596,6 +1597,7 @@ export async function* routeSerial(
       let textContent = '';
       checkpointPreparation('history_and_prompt');
       let persistedDoneContent: string | undefined;
+      let persistedLayoutContent: string | undefined;
       const thinkingChunks: string[] = [];
       let persistedMetadata: MessageMetadata | undefined;
       const remoteCancellation = createRemoteCancellationObserver();
@@ -2099,6 +2101,18 @@ export async function* routeSerial(
             }
           }
 
+          if (effectiveMsg.extra?.startupRecovery) {
+            if (
+              !(await persistStartupRecovery(
+                deps.messageStore,
+                effectiveMsg,
+                lifecycleResponseMessageId,
+                ownInvocationId,
+              ))
+            )
+              continue;
+            effectiveMsg = { ...effectiveMsg, messageId: lifecycleResponseMessageId };
+          }
           if (effectiveMsg.type === 'text') {
             const fragment = effectiveMsg.content;
             if (outputProjection) {
@@ -2680,6 +2694,9 @@ export async function* routeSerial(
         const persistedContent = conciergeActionSourceContent
           ? projectConciergeStoredContent(storedContent)
           : storedContent;
+        // Layout hashes must attest the same normalized body for live done and cold history.
+        // Keep the existing done.content policy independent of this proof input.
+        persistedLayoutContent = persistedContent;
         if (conciergeActionSourceContent !== undefined) {
           persistedDoneContent = persistedContent;
         }
@@ -3065,6 +3082,13 @@ export async function* routeSerial(
               actionOutputCommitAllowed &&
               visibleTurnInvocationId === ownInvocationId,
           });
+          const outputConfig = executionBinding.catConfig;
+          outputProjection?.settle({
+            succeeded:
+              Boolean(doneMsg) && !hadError && !doneMsg?.errorCode && !catSignal?.aborted && actionOutputCommitAllowed,
+            nativePhases:
+              !outputConfig?.clientId || outputConfig.clientId === 'openai' || outputConfig.provider === 'openai',
+          });
           const streamMessageInput: AppendMessageInput = {
             from: { kind: 'agent', catId },
             userId,
@@ -3198,6 +3222,20 @@ export async function* routeSerial(
                 );
           } else {
             storedMsg = await deps.messageStore.append(streamMessageInput);
+          }
+          if (
+            storedMsg &&
+            ownInvocationId &&
+            actionOutputCommitAllowed &&
+            lifecycleTerminalStatus === 'completed' &&
+            deps.messageSearchAnswerService
+          ) {
+            try {
+              storedMsg = await deps.messageSearchAnswerService.publishResponse(storedMsg, ownInvocationId);
+              allRichBlocks = [...(storedMsg.extra?.rich?.blocks ?? allRichBlocks)];
+            } catch {
+              log.warn({ threadId, messageId: storedMsg.id }, 'Search answer binding pending on committed response');
+            }
           }
           storedMsgId = storedMsg?.id;
           turnStoredMessageId = storedMsgId;
@@ -3465,6 +3503,25 @@ export async function* routeSerial(
               // distinction that used to route mutating tools here belonged to the closure gate,
               // which is retired — nothing downstream re-runs a turn behind the cat's back.
               storedNoText = await deps.messageStore.append(noTextMessageInput);
+            }
+            if (
+              storedNoText &&
+              ownInvocationId &&
+              actionOutputCommitAllowed &&
+              lifecycleTerminalStatus === 'completed' &&
+              deps.messageSearchAnswerService
+            ) {
+              try {
+                storedNoText = await deps.messageSearchAnswerService.publishResponse(storedNoText, ownInvocationId);
+                const bound = storedNoText.extra?.messageSearchAnswer;
+                const block = bound && storedNoText.extra?.rich?.blocks.find((block) => block.id === bound.blockId);
+                if (block && !noTextBlocks.some((current) => current.id === block.id)) noTextBlocks.push(block);
+              } catch {
+                log.warn(
+                  { threadId, messageId: storedNoText.id },
+                  'Search answer binding pending on committed response',
+                );
+              }
             }
             // F088-P3: Stash rich blocks for outbound delivery (no-text branch)
             if (storedNoText && options.persistenceContext && noTextBlocks.length > 0) {
@@ -3841,7 +3898,7 @@ export async function* routeSerial(
           ...ownStampedDone,
           extra: {
             ...ownStampedDone.extra,
-            ...outputLayoutExtra(outputProjection, persistedDoneContent ?? textContent),
+            ...outputLayoutExtra(outputProjection, persistedDoneContent ?? persistedLayoutContent ?? textContent),
           },
           ...(cancellationDiagnostics ? { metadata: persistedMetadata } : {}),
           ...(persistedDoneContent !== undefined ? { content: persistedDoneContent } : {}),

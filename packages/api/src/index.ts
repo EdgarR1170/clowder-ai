@@ -24,6 +24,7 @@ import { createMessagingStores } from './domains/messaging/stores/factory.js';
 import { SubscriptionDrainScheduler } from './domains/messaging/subscription-drain-scheduler.js';
 import { declaredAgentSessionProviders } from './domains/plugin/declared/declared-agent-session-providers.js';
 import { PLUGIN_HOST_ENTRIES, pluginHostRoot } from './domains/plugin/host-inventory/plugin-host-layout.js';
+import { createCollectiveWorkCalendarReader } from './domains/plugin/host-surface/collective-work-calendar.js';
 import { createPluginConversationDelivery } from './domains/plugin/host-surface/plugin-conversation-delivery.js';
 import { catRegistryMentionPatterns } from './infrastructure/connectors/mention-parser.js';
 /**
@@ -55,7 +56,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyReply } from 'fastify';
 import { resolveAnthropicRuntimeProfile, validateRuntimeProviderBinding } from './config/account-resolver.js';
 import { resolveInvokeCapabilityRoot } from './config/capabilities/invoke-capability-root.js';
-import { regenerateStartupCliConfigs } from './config/capabilities/startup-cli-config.js';
+import { migrateStartupCodexMcpConfig, regenerateStartupCliConfigs } from './config/capabilities/startup-cli-config.js';
 import { resolveBoundAccountRefForCat, usesNativeToolConfiguration } from './config/cat-account-binding.js';
 import {
   bootstrapDefaultCatCatalog,
@@ -157,6 +158,7 @@ import {
 } from './domains/cats/services/agents/invocation/response-draft-settlement.js';
 import { SessionContinuationCoordinator } from './domains/cats/services/agents/invocation/SessionContinuationCoordinator.js';
 import { SessionMutex } from './domains/cats/services/agents/invocation/SessionMutex.js';
+import { sharedMcpDeploymentId } from './domains/cats/services/agents/invocation/shared-mcp-launch.js';
 import {
   createSidebarPresenceSource,
   type SidebarTerminalExecution,
@@ -425,6 +427,7 @@ import { runSchedulerReplyUserIdBackfill } from './infrastructure/scheduler/sche
 import { securityHeadersPlugin } from './infrastructure/security-headers.js';
 import { sessionAuthPlugin, sessionRoute } from './infrastructure/session-auth.js';
 import { startupMilestone } from './infrastructure/startup-diagnostics.js';
+import { startProcessCpuCapture } from './infrastructure/telemetry/cpu/process-cpu-capture.js';
 import { SocketManager } from './infrastructure/websocket/index.js';
 import { avatarsRoutes } from './routes/avatars.js';
 import {
@@ -1451,6 +1454,32 @@ async function main(): Promise<void> {
       return excluded;
     },
   });
+  const { MessageSearchService } = await import('./domains/memory/MessageSearchService.js');
+  const { MessageSearchAnswerPublicationStore } = await import(
+    './domains/memory/MessageSearchAnswerPublicationStore.js'
+  );
+  const { MessageSearchAnswerPublicationService } = await import(
+    './domains/memory/MessageSearchAnswerPublicationService.js'
+  );
+  const messageSearchService = new MessageSearchService({
+    evidenceStore: memoryServices.evidenceStore,
+    threadStore,
+    messageStore,
+  });
+  const messageSearchAnswerService = new MessageSearchAnswerPublicationService(
+    new MessageSearchAnswerPublicationStore(memoryServices.store.getDb(), (work) =>
+      memoryServices.store.runExclusive(work),
+    ),
+    messageSearchService,
+    messageStore,
+    threadStore,
+  );
+  app.log.info(
+    { messageSearchAnswerRecovery: await messageSearchAnswerService.recoverPreparedResponses() },
+    'Existing search answer bindings reconciled',
+  );
+  const { registerMessageSearchAnswerRoute } = await import('./routes/message-search-answer-route.js');
+  registerMessageSearchAnswerRoute(app, messageSearchAnswerService);
   const profileMemoryLifecycleStore = new ProfileMemoryLifecycleStore({
     db: memoryServices.store.getDb(),
     repository: profileRepository,
@@ -1760,6 +1789,17 @@ async function main(): Promise<void> {
     progress: (entry, targetCatId) => queueProcessor.progressOwnedCarrier(entry, targetCatId),
   });
   const schedulerDeliver = createDeliverFn({ messageStore, socketManager, persistedQueueDelivery });
+  const { WorktreeNoticeService } = await import('./infrastructure/worktrees/WorktreeNoticeService.js');
+  const worktreeNotices = new WorktreeNoticeService({
+    repoRoot,
+    scriptRoot: runtimeEntrypointRoot,
+    getThread: async (id) => threadStore.get(id),
+    isOwnerAvailable: (id) => catRegistry.has(id) && isCatAvailable(id),
+    deliver: schedulerDeliver,
+    warn: (message) => app.log.warn(message),
+  });
+  worktreeNotices.start();
+  app.addHook('onClose', async () => worktreeNotices.stop());
   const schedulerDeliverPrivate = createDeliverPrivateFn({ persistedQueueDelivery });
   const schedulerLifecycleToast = createLifecycleToastFn({ socketManager });
   const schedulerFetchContent = createFetchContentFn();
@@ -2530,6 +2570,7 @@ async function main(): Promise<void> {
   // Shared AgentRouter — used by messagesRoutes and invocationsRoutes
   const { TurnCustodyProjectionService } = await import('./domains/ball-custody/TurnCustodyProjectionService.js');
   const turnCustodyProjectionService = new TurnCustodyProjectionService({
+    tasks: taskStore,
     ...(actionSuccessorLeaseStore ? { actionSuccessorLeaseStore } : {}),
   });
   const { LiveCompanionSessions } = await import('./domains/concierge/live/LiveCompanionSessions.js');
@@ -2675,9 +2716,53 @@ async function main(): Promise<void> {
   let trustedImagePathResolver: (hmrId: string) => Promise<string | undefined> = async () => undefined;
   const { createOwnedWaitStatusReader } = await import('./domains/ball-custody/OwnedWaitStatus.js');
   const ownedWaitStatusReader = createOwnedWaitStatusReader({ taskStore, dynamicTaskStore });
+  const { OrdinaryTaskHandoffService } = await import('./domains/ball-custody/OrdinaryTaskHandoffService.js');
+  const cliExecutionOwnerService = createCliExecutionOwnerService({ log: app.log });
+  const { LegacyTaskExecutionResolver } = await import('./domains/ball-custody/LegacyTaskExecution.js');
+  const { taskCliProviderIsStopped } = await import('./domains/ball-custody/task-provider-stop-proof.js');
+  const { taskHandoffDispatchAuthority } = await import('./routes/task-handoff-dispatch-authority.js');
+  const legacyTaskExecutions = new LegacyTaskExecutionResolver({
+    leases: actionSuccessorLeaseStore,
+    messages: messageStore,
+    turns: turnExecutionStore,
+    delegates: taskApprovedDelegateProvider,
+  });
+  const ordinaryTaskHandoffs = new OrdinaryTaskHandoffService({
+    tasks: taskStore,
+    messages: messageStore,
+    threads: threadStore,
+    turns: turnExecutionStore,
+    delegates: taskApprovedDelegateProvider,
+    tracker: invocationTracker,
+    dispatchAuthority: taskHandoffDispatchAuthority(dispatchProposalStore, app.log),
+    legacy: legacyTaskExecutions,
+    providerIsStopped: taskCliProviderIsStopped,
+    stopExecution: async (ref, userId) => {
+      const live = await cliExecutionOwnerService.listLive();
+      if (
+        !live.complete ||
+        !live.owners.some(
+          (owner) =>
+            owner.invocationId === ref.invocationId &&
+            owner.executionId === ref.parentInvocationId &&
+            owner.threadId === ref.threadId &&
+            owner.catId === ref.catId &&
+            owner.userId === userId,
+        )
+      )
+        return;
+      await cliExecutionOwnerService.terminateExact({ ...ref, executionId: ref.parentInvocationId, userId });
+    },
+    onExecutionReleased: (threadId) => {
+      queueProcessor.requestDrain(threadId);
+    },
+  });
   router = new AgentRouter({
+    ordinaryTaskHandoffs,
+    messageSearchAnswerService,
     ownedWaitStatusReader,
     resolveTrustedImagePath: async (hmrId) => trustedImagePathResolver(hmrId),
+    resolveInvocationPluginMcpView: () => pluginRuntime.supervisor.resolveMemberMcpView(),
 
     agentRegistry,
     registry,
@@ -2777,6 +2862,8 @@ async function main(): Promise<void> {
   });
   const queueProcessor = new QueueProcessor(
     {
+      ordinaryTaskHandoffs,
+      taskStore,
       queue: invocationQueue,
       liveCompanionSessions,
       invocationTracker,
@@ -2983,6 +3070,7 @@ async function main(): Promise<void> {
   if (actionSuccessorLeaseStore && actionSubjectTruthResolver) {
     const { ActionSuccessorRecoverySweep } = await import('./domains/ball-custody/ActionSuccessorRecoverySweep.js');
     actionSuccessorRecovery = new ActionSuccessorRecoverySweep({
+      tasks: taskStore,
       leaseStore: actionSuccessorLeaseStore,
       deliverReturnCarrier: async (carrier) => {
         const invocationKey = actionSuccessorInvocationIdempotencyKey(carrier.idempotencyKey);
@@ -3030,6 +3118,7 @@ async function main(): Promise<void> {
         return recoveryStatus === 'terminal' ? { outcome: 'unavailable' as const } : { outcome: 'enqueued' as const };
       },
       dispatch: {
+        tasks: taskStore,
         leaseStore: actionSuccessorLeaseStore,
         truthResolver: actionSubjectTruthResolver,
         loadProposal: (proposalId) => dispatchProposalStore.get(proposalId),
@@ -3240,6 +3329,10 @@ async function main(): Promise<void> {
     },
   };
   await app.register(messagesRoutes, messagesOpts);
+  await app.register((await import('./routes/cloud-return-read.js')).cloudReturnReadRoutes, {
+    messageStore,
+    threadStore,
+  });
   await app.register(messageBundleRoutes, { messageStore, threadStore });
   // F297 Phase B: 所有"什么在跑"的问题收口到同一个 domain service。
   //
@@ -3247,7 +3340,6 @@ async function main(): Promise<void> {
   // running child 三张执行面各自既提名候选、也自己定性。旧结构把三源都塞进候选、却统一交给
   // 只认识 live invocation 的 classifier 定性，于是 managed command 与 standalone child
   // 候选进来、定性落空、presence=null，被终态回落误报成 done/error（R3 P1-1 / P1-2）。
-  const cliExecutionOwnerService = createCliExecutionOwnerService({ log: app.log });
   const activeExecutionService = createActiveExecutionService({
     invocationTracker,
     recordStore: invocationRecordStore,
@@ -3298,7 +3390,12 @@ async function main(): Promise<void> {
       dismissTracker,
     });
   }
+  let assetCanonService: import('./domains/collaborative-content/asset-canon/service.js').AssetCanonService | undefined;
+  let memberCanonService:
+    | import('./domains/collaborative-content/asset-canon/member-service.js').MemberCanonService
+    | undefined;
   await app.register(catsRoutes, {
+    memberAssets: () => memberCanonService,
     resolveContextCapacitySnapshot: (catId) => router.contextCapacitySnapshot(catId),
     resolveCarrierCapability: (catId) => router.freshnessCarrierCapability(catId),
   });
@@ -3347,7 +3444,11 @@ async function main(): Promise<void> {
   }
   // F300 Task 2.1: the capability board for cats, read through the same pure
   // service as the Console's GET /api/capabilities, without its writes.
-  await app.register(capabilitySnapshotRoutes, { callbackRegistry: registry, agentKeyRegistry });
+  await app.register(capabilitySnapshotRoutes, {
+    callbackRegistry: registry,
+    agentKeyRegistry,
+    resolvePluginMcpView: () => pluginRuntime.supervisor.resolveMemberMcpView(),
+  });
   await app.register(usageRoutes, { invocationRecordStore });
   // F150: Tool/Skill/MCP usage statistics
   if (toolUsageCounter) {
@@ -3495,9 +3596,7 @@ async function main(): Promise<void> {
     ? await loadOrCreateLegacyPawFeelBlockerCensusCursorSigner(redis)
     : undefined;
   const pawFeelInboxAuditCursorSigner = redis ? await loadOrCreatePawFeelInboxAuditCursorSigner(redis) : undefined;
-  const pawFeelFixResolver = actionSuccessorLeaseStore
-    ? new PawFeelFixEvidenceResolver({ leaseStore: actionSuccessorLeaseStore, taskStore })
-    : undefined;
+  const pawFeelFixResolver = new PawFeelFixEvidenceResolver({ leaseStore: actionSuccessorLeaseStore, taskStore });
   const pawFeelSourceVerifier = new PawFeelDirectRepairSourceVerifier({
     ownerUserId: privateUserId,
     messageStore,
@@ -4618,6 +4717,7 @@ async function main(): Promise<void> {
   }
 
   const callbackOpts = {
+    ordinaryTaskHandoffs,
     ...(routingContextRuntime ? { routingSelection: routingContextRuntime.selectionService } : {}),
     proposalProjectRoot: resolveActiveProjectRoot(),
     companionCollectiveAccountability: readCollectiveAttention,
@@ -4740,6 +4840,8 @@ async function main(): Promise<void> {
     indexBuilder: memoryServices.indexBuilder as
       | { markThreadDirty(threadId: string): void; flushDirtyThreads?(): number | Promise<number> }
       | undefined,
+    messageSearchAnswerService,
+    messageSearchService,
     evidenceStore: memoryServices.evidenceStore,
     markerQueue: memoryServices.markerQueue,
     reflectionService: memoryServices.reflectionService,
@@ -4795,8 +4897,14 @@ async function main(): Promise<void> {
   // members (iCode), authenticated per invocation against the live registry.
   registerMemberMcpRoutes(app, {
     registry,
-    resolveMemberToolFamilies: ({ catId }) => resolveMemberToolFamiliesForCat(resolveActiveProjectRoot(), catId),
+    resolveMemberToolFamilies: ({ catId, sharedContext }) =>
+      resolveMemberToolFamiliesForCat(
+        sharedContext?.capabilityRoot ?? resolveActiveProjectRoot(),
+        catId,
+        sharedContext?.workspaceRoot,
+      ),
     apiBaseUrl: `http://127.0.0.1:${PORT}`,
+    deploymentId: sharedMcpDeploymentId(`http://127.0.0.1:${PORT}`),
     log: app.log,
   });
   await app.register(callbackRuntimeInteractionRoutes, {
@@ -5002,6 +5110,8 @@ async function main(): Promise<void> {
   const preparedArtifactReader = new F232PreparedArtifactReader({
     messages: messageStore,
   });
+  const collectiveMaterialSourceHolder: import('./domains/plugin/host-surface/collective-material-source.js').CollectiveMaterialSourceHolder =
+    {};
   const collectiveArtifactOwnerHolder: import('./domains/plugin/host-surface/collective-artifact-owner.js').CollectiveArtifactOwnerHolder =
     {};
   const pluginRuntime = cloudConversations.createRuntime({
@@ -5034,6 +5144,7 @@ async function main(): Promise<void> {
           }),
       }),
     collectiveArtifactOwner: collectiveArtifactOwnerHolder,
+    collectiveMaterialSource: collectiveMaterialSourceHolder,
     taskArtifactReader: preparedArtifactReader,
     limbRegistry,
     taskRunner: {
@@ -5051,6 +5162,7 @@ async function main(): Promise<void> {
     ]),
     projectRoot: pluginProjectRoot,
     capabilityProjectRoot: pluginCapabilityRoot,
+    binaryProjectRoot: runtimeEntrypointRoot,
     editorParentOrigin: new URL(resolveFrontendBaseUrl(process.env, app.log)).origin,
     desktopExecutor: {
       prepare: async () => {
@@ -5232,12 +5344,10 @@ async function main(): Promise<void> {
   subscriptionDrainScheduler.attach(pluginRuntime.subscriptionDelivery);
   const { registerConciergeDesktopRoutes } = await import('./routes/concierge-desktop.js');
   registerConciergeDesktopRoutes(app, { ownerUserId: privateUserId, desktop: pluginRuntime.ownerDesktop });
-  app.addHook('onClose', async () => pluginRuntime.shutdown('api_shutdown'));
-  const { resolveLocalPluginEffectiveGrants } = await import('./domains/plugin/manager/machine-catalog-provider.js');
+  const { registerPluginRuntimeShutdown } = await import('./routes/plugin-runtime-shutdown.js');
+  registerPluginRuntimeShutdown(app, pluginRuntime);
   const { OFFICIAL_BUNDLED_MANIFESTS } = await import('./domains/plugin/official-catalog.js');
-  const { createHostOfficialPluginCatalog, PLUGIN_MANAGER_HOST_POLICIES: pluginManagerHostPolicies } = await import(
-    './domains/plugin/manager/host-official-catalog.js'
-  );
+  const { createHostOfficialPluginCatalog } = await import('./domains/plugin/manager/host-official-catalog.js');
   const { GitMarketplaceRepository } = await import(
     './domains/plugin/manager/marketplace/git-marketplace-repository.js'
   );
@@ -5275,7 +5385,6 @@ async function main(): Promise<void> {
       await companionDesktopComponent.prepare();
     },
     catalogManifests: OFFICIAL_BUNDLED_MANIFESTS,
-    localGrantPolicy: (manifest) => resolveLocalPluginEffectiveGrants(pluginManagerHostPolicies, manifest),
   });
   const { InstalledPluginOperations, pluginOperationRoutes } = await import(
     './domains/plugin/operations/plugin-operation-routes.js'
@@ -5303,6 +5412,13 @@ async function main(): Promise<void> {
     configuration: pluginManagerRuntime.configuration,
     invocation: pluginRuntime.supervisor,
   });
+  const { createInstalledCollectiveMaterialSource } = await import(
+    './domains/plugin/host-surface/collective-material-source.js'
+  );
+  collectiveMaterialSourceHolder.current = createInstalledCollectiveMaterialSource(
+    collectiveSourceOperations,
+    privateUserId,
+  );
   collectiveAttentionReader = createCollectiveAccountabilitySource(collectiveSourceOperations, privateUserId);
   const { createCollectiveWorkResultAttentionSource } = await import(
     './domains/plugin/host-surface/collective-work-result-attention.js'
@@ -5342,20 +5458,6 @@ async function main(): Promise<void> {
     // Offline discovery must not prevent the Host from opening. The durable journal retries
     // unfinished entries on restart; completed entries (including user uninstalls) stay completed.
     app.log.warn({ err: error }, '[api] Initial plugin installation deferred until next startup');
-  }
-  // F202 W2-6: grants follow the Host policy for instances installed before a policy change too;
-  // done before recovery so every resumed runtime starts with the grants it will run with.
-  const { reconcileOfficialPluginGrants } = await import('./domains/plugin/manager/official-plugin-grants.js');
-  const officialGrantChanges = await reconcileOfficialPluginGrants({
-    store: pluginRuntime.inventoryStore,
-    inventory: pluginRuntime.inventory,
-    hostPolicies: pluginManagerHostPolicies,
-  });
-  if (officialGrantChanges.length > 0) {
-    app.log.info(
-      { changes: officialGrantChanges },
-      '[api] F202 official plugin grants reconciled with the Host policy',
-    );
   }
   // Released once app.listen resolves. A resumed desktop window's bridge calls
   // app.inject; before Fastify has booted that breaks the remaining app.register
@@ -5705,7 +5807,7 @@ async function main(): Promise<void> {
 
   // F246: Approval Hub — unified operator approval center.
   const approvalProducerRegistry = new ApprovalProducerRegistry({
-    F128: bindLegacyApprovalProducer(new F128ApprovalAdapter(proposalStore)),
+    F128: bindLegacyApprovalProducer(new F128ApprovalAdapter(proposalStore, (id) => threadStore.get(id))),
     F139: bindLegacyApprovalProducer(new F139ApprovalAdapter(scheduleMutationProposalStore)),
     F193: bindLegacyApprovalProducer(new F193ApprovalAdapter(dispatchProposalStore)),
     F221: bindLegacyApprovalProducer(new F221ApprovalAdapter(tasteProposalStore)),
@@ -5780,6 +5882,16 @@ async function main(): Promise<void> {
     './domains/collaborative-content/collective-artifact/owner-router.js'
   );
   const collectiveArtifactOwner = createCollectiveArtifactOwner({
+    transcribeAudio: (
+      await import('./infrastructure/connectors/media/CollectiveSttProvider.js')
+    ).createConfiguredCollectiveTranscriber(),
+    stickerDirectories: {
+      memory: join(findMonorepoRoot(dirname(fileURLToPath(import.meta.url))), 'packages/web/public/f321/stickers'),
+      collaboration: join(
+        findMonorepoRoot(dirname(fileURLToPath(import.meta.url))),
+        'docs/videos/shared-assets/cat-stickers/2026-10-11-collaboration',
+      ),
+    },
     owner: collaborativeContent.owner,
     media: artifactReview.media,
     reviews: workspaceContentReviews.store,
@@ -5889,7 +6001,21 @@ async function main(): Promise<void> {
         (await artifactReview.media.read(reference.contentRef, reference.ownerRevision, workMediaPrincipal(principal)))
           .blobDigest,
     }),
-    authorize: (reference, principal, permission) => livingWorks.authorizeVersion(reference, principal, permission),
+    authorize: (reference, principal, permission) =>
+      livingWorks.authorizeVersion(
+        reference,
+        principal.actor.kind === 'human' && !principal.threadId
+          ? {
+              ...principal,
+              threadId:
+                artifactReview.store.works.get(principal.userId, reference.contentRef, reference.ownerRevision)
+                  ?.threadId ?? '',
+            }
+          : principal,
+        permission,
+      ),
+    verifyAssets: (context, principal, retained) => assetCanonService!.verifySelections(context, principal, retained),
+    assertAssetSelections: (context, owner, retained) => assetCanonService!.assertSelections(context, owner, retained),
     media: async (reference, principal) => {
       const asset = await artifactReview.media.read(
         reference.contentRef,
@@ -5908,13 +6034,82 @@ async function main(): Promise<void> {
       threadId: principal.threadId ?? scope.threadId,
     });
   });
-  await registerLivingWorkRoutes(app, { service: livingWorks, registry, contexts: workContexts });
   const { registerWorkVideoAssetRoutes } = await import('./routes/work-video-asset-routes.js');
   const { VideoProjectAssetIndex } = await import('./domains/video-studio/project/asset-index.js');
   const { resolveWorkspaceContentRoot } = await import('./domains/workspace/workspace-content-source-factory.js');
-  registerWorkVideoAssetRoutes(app, {
+  const canonAssetIndex = new VideoProjectAssetIndex({ resolveRoot: resolveWorkspaceContentRoot });
+  const { MediaOwnerError } = await import('./domains/video-studio/content-owner/media-errors.js');
+  const { AssetCanonService } = await import('./domains/collaborative-content/asset-canon/service.js');
+  const { MemberCanonService } = await import('./domains/collaborative-content/asset-canon/member-service.js');
+  const { getResolvedCats } = await import('./config/resolved-cats.js');
+  const producerAuthorizer = createWorkAuthorizer({
+    ownerUserId: privateUserId,
+    access: artifactReview.media.access,
+    invocation: (id) => registry.peekRecord(id),
+  });
+  assetCanonService = new AssetCanonService({
+    store: artifactReview.store.works.assets,
+    contextStore: artifactReview.store.works.contexts,
     contexts: workContexts,
-    assets: new VideoProjectAssetIndex({ resolveRoot: resolveWorkspaceContentRoot }),
+    authorize: async (principal) => {
+      if (principal.userId !== privateUserId) throw new MediaOwnerError('access_denied');
+      if (principal.actor.kind === 'human') {
+        if (principal.actor.actorId !== privateUserId || principal.invocationId)
+          throw new MediaOwnerError('access_denied');
+      } else await producerAuthorizer({ principal, permission: 'read' });
+    },
+    authorizeWork: (reference, principal, permission) =>
+      livingWorks.authorizeVersion(
+        reference,
+        principal.actor.kind === 'human' && !principal.threadId
+          ? {
+              ...principal,
+              threadId:
+                artifactReview.store.works.get(principal.userId, reference.contentRef, reference.ownerRevision)
+                  ?.threadId ?? '',
+            }
+          : principal,
+        permission,
+      ),
+    authorizeRoot: async (version) => {
+      try {
+        await resolveWorkspaceContentRoot(version.locator.rootId);
+      } catch {
+        throw new MediaOwnerError('access_denied');
+      }
+    },
+    inspect: async (version, principal) => {
+      const locator = await workspaceContentReviews.source.resolveFileLocator({
+        principal: { userId: principal.userId },
+        locator: { worktreeId: version.locator.rootId, path: version.locator.path },
+      });
+      return canonAssetIndex.inspect({ kind: 'workspace', rootId: locator.worktreeId, path: locator.path });
+    },
+    assertMember: async (catId, principal) => {
+      if (
+        principal.actor.kind !== 'human' ||
+        principal.invocationId ||
+        principal.userId !== privateUserId ||
+        !getResolvedCats(resolveActiveProjectRoot())[catId]
+      )
+        throw new MediaOwnerError('access_denied');
+    },
+  });
+  memberCanonService = new MemberCanonService(assetCanonService, privateUserId);
+  await registerLivingWorkRoutes(app, {
+    service: livingWorks,
+    registry,
+    contexts: workContexts,
+    assets: assetCanonService,
+  });
+  registerWorkVideoAssetRoutes(app, { contexts: workContexts, assets: canonAssetIndex });
+  const { registerAssetCanonRoutes } = await import('./routes/asset-canon-routes.js');
+  registerAssetCanonRoutes(app, assetCanonService, canonAssetIndex);
+  const { registerMemberCanonRoutes } = await import('./routes/member-canon-routes.js');
+  registerMemberCanonRoutes(app, {
+    members: memberCanonService,
+    assets: canonAssetIndex,
+    source: workspaceContentReviews.source,
   });
   artifactWorkLineageHolder.independent = new WorkCatalogue(livingWorks, artifactReview.store.works.contexts);
   if (!artifactReview.ledgers) throw new Error('F309 publication ledger requires the F063 source owner');
@@ -6114,6 +6309,7 @@ async function main(): Promise<void> {
   });
   const entrustedWorkOwnerRead = new EntrustedWorkOwnerReadService({
     tasks: taskStore,
+    collectiveCalendarReader: createCollectiveWorkCalendarReader(collectiveSourceOperations, privateUserId),
     producerCatalog: needsMeProducerCatalog,
     artifactReader: artifactReview.artifactReader,
     taskExecution: entrustedWorkTaskExecution,
@@ -6327,7 +6523,10 @@ async function main(): Promise<void> {
     });
   }
   await app.register(tasksRoutes, {
+    ordinaryTaskHandoffs,
+    messageStore,
     taskStore,
+    threadStore,
     socketManager,
     deploymentWaitLifecycleHolder,
     humanTerminal: entrustedWorkHumanTerminal,
@@ -6576,7 +6775,9 @@ async function main(): Promise<void> {
   await app.register(accountsRoutes);
   await app.register(claudeRescueRoutes);
   await app.register(auditRoutes, { threadStore });
-  await app.register(capabilitiesRoutes);
+  await app.register(capabilitiesRoutes, {
+    resolvePluginMcpView: () => pluginRuntime.supervisor.resolveMemberMcpView(),
+  });
   await app.register(audioProxyRoutes);
 
   {
@@ -6896,12 +7097,6 @@ async function main(): Promise<void> {
   const rebuildJobTracker = new RebuildJobTracker();
 
   // Evidence search (SQLite) + reindex endpoint (D-11) + F-4 federated search + F188 rebuild
-  const { MessageSearchService } = await import('./domains/memory/MessageSearchService.js');
-  const messageSearchService = new MessageSearchService({
-    evidenceStore: memoryServices.evidenceStore,
-    threadStore,
-    messageStore,
-  });
   await app.register(evidenceRoutes, {
     evidenceStore: memoryServices.evidenceStore,
     messageSearchService,
@@ -7255,6 +7450,17 @@ async function main(): Promise<void> {
   // delivery boundary, so register cleanup now and late-bind its handle below.
   let designGateThresholdObserver: { close(): void } | null = null;
   app.addHook('onClose', async () => designGateThresholdObserver?.close());
+  let processCpuCapture: { close(): Promise<void> } | undefined;
+  app.addHook('onClose', async () => processCpuCapture?.close());
+
+  // New managed HTTP launches must never race their persistent stdio migration.
+  const migratedCodexServers = await migrateStartupCodexMcpConfig(process.cwd());
+  if (migratedCodexServers.length) {
+    app.log.info(
+      { serverNames: migratedCodexServers },
+      '[api] migrated owned Codex stdio entries; explicit rollback profile preserved',
+    );
+  }
 
   // #603: Preload governance overlay (.local / .local-override)
   // Start listening
@@ -7291,6 +7497,11 @@ async function main(): Promise<void> {
       listen: async () => {
         const listening = await app.listen({ port: PORT, host: HOST });
         startupMilestone('http-listening');
+        processCpuCapture = startProcessCpuCapture({
+          enabled: process.env.CAT_CAFE_CPU_CAPTURE_ONCE === '1',
+          dataDir: process.env.CAT_CAFE_DATA_DIR ?? join(homedir(), '.cat-cafe'),
+          logger: app.log,
+        });
         releaseHostListening();
         await initialPlugins?.activate();
         return listening;

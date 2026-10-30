@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { channel } from 'node:diagnostics_channel';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -104,33 +103,34 @@ for (const reason of ['AbortError', 'TimeoutError'])
     assert.doesNotMatch(JSON.stringify(snapshots), /secret-body|柚子|SELECT|bindings/);
   });
 
-// Existing production inputs: this RED enters native SQLite without a new observer option.
-test('native deadline already carries the last SQL but must also preserve CJK progress', async (t) => {
+test('a checkpoint-triggered native deadline retains its observed SQL and CJK progress', async (t) => {
   const { store } = await fixture(t, 16000, true);
   const control = new AbortController();
-  const events = channel('cat-cafe.memory-process');
-  let cancel;
-  const listener = (e) => {
-    if (e.kind === 'message-search' && !cancel)
-      cancel = setTimeout(() => control.abort(new DOMException('controlled native deadline', 'TimeoutError')), 50);
-  };
-  events.subscribe(listener);
-  t.after(() => {
-    events.unsubscribe(listener);
-    clearTimeout(cancel);
-  });
+  let observed;
   await assert.rejects(
     store.searchMessagePassages('柚子', {
       mode: 'lexical',
       sort: 'time',
       visibleThreadIds: ['neutral'],
       signal: control.signal,
+      // A fail-safe only: reaching it without the real checkpoint must fail the assertions below.
+      deadlineAt: Date.now() + 8000,
+      onReadSnapshot(snapshot) {
+        if (snapshot.cjk?.outcome !== 'running' || control.signal.aborted) return;
+        observed = snapshot;
+        control.abort(new DOMException('controlled native deadline', 'TimeoutError'));
+      },
     }),
     (error) => {
       assert.equal(error, control.signal.reason);
+      assert.ok(observed, 'cancellation must follow an actual CJK checkpoint, not elapsed wall time');
+      assert.ok(observed.cjk.bodyVisits >= 256);
+      assert.equal(error.memoryProcess.pid, observed.pid);
       assert.equal(error.memoryProcess.lastObservedSql.event, 'sql-start');
       assert.ok(error.memoryProcess.lastObservedSql.caller.some((s) => s.includes('message-passage-lexical')));
-      assert.ok(error.memoryProcess.cjk?.bodyVisits > 0, 'real native cancellation must retain bounded CJK progress');
+      assert.deepEqual(error.memoryProcess.cjk, observed.cjk);
+      assert.equal(error.memoryProcess.cjk.complete, false);
+      assert.equal(error.memoryProcess.cjk.returnedRows, null);
       return true;
     },
   );
@@ -152,10 +152,28 @@ test('an absolute native deadline retains only observed progress and does not fa
     (error) => {
       assert.equal(error.name, 'TimeoutError');
       assert.equal(error.memoryProcess.outcome, 'rejected');
-      assert.equal(error.memoryProcess.lastObservedSql.event, 'sql-start');
+      if (error.memoryProcess.lastObservedSql) {
+        const sql = error.memoryProcess.lastObservedSql;
+        assert.match(sql.sqlFingerprint, /^[a-f0-9]{64}$/);
+        if (sql.event === 'sql-start') {
+          assert.equal(sql.elapsedMs, undefined);
+          assert.equal(sql.rows, undefined);
+        } else {
+          assert.equal(sql.event, 'sql-finish');
+          assert.ok(sql.elapsedMs >= 0, 'a completed subquery keeps its measured duration');
+          assert.ok(sql.rows === null || (Number.isInteger(sql.rows) && sql.rows >= 0));
+        }
+      } else {
+        assert.equal(error.memoryProcess.sqlObservations, 0);
+        assert.equal(error.memoryProcess.observedSqlMs, 0);
+        assert.equal(error.memoryProcess.cjk, null, 'a deadline before SQL observation has no native witness');
+      }
       if (error.memoryProcess.cjk) {
-        assert.equal(error.memoryProcess.cjk.complete, false);
-        assert.equal(error.memoryProcess.cjk.returnedRows, null);
+        const cjk = error.memoryProcess.cjk;
+        assert.equal(cjk.complete, cjk.outcome !== 'running');
+        if (cjk.outcome === 'fulfilled') {
+          assert.ok(Number.isInteger(cjk.returnedRows) && cjk.returnedRows >= 0);
+        } else assert.equal(cjk.returnedRows, null);
       } else assert.equal(error.memoryProcess.cjk, null, 'no checkpoint is unknown, not zero work');
       return true;
     },

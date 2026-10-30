@@ -1821,7 +1821,7 @@
     {
       "id": "F309",
       "name": "产物协作 — Artifact Collaboration / Collaborative Content Plane",
-      "status": "in-progress / Phase R 历史有界交付保留；Phase U 的 Studio 297 作品体验工作单元已在 #5507/#5521 合入后通过父 Alpha 与原设计负责人实页复看；其余 Phase U、Office/video Admission Gate 与未勾 AC 仍开放",
+      "status": "in-progress / Phase R、Studio 297 历史有界交付保留；Phase U 归一四项补漏、#6264 prepared、#6275 卡片与 #6277 raw缩略/目录阅读器均已过父 Alpha；Human829工具栏修复#6292已过父Alpha与正式boot59五宽度；原讨论稿Chat/Works/Home全部路径正式往返通过，共同Markdown卡片YAML问题已由#6296审合并过父Alpha及正式boot60三入口，原Task414/g22这处正式验收闭合，完整正式体验、Phase U、Office/video Admission Gate与未勾AC仍开放",
       "file": "F309-collaborative-content-plane.md"
     },
     {
@@ -1923,7 +1923,7 @@
     {
       "id": "F327",
       "name": "Google Family Suite｜Siamese家全家桶接入",
-      "status": "spec | **Owner**: 待认领（operator 指定交给「多人创意游戏 脑洞大会」thread；起步期 You 可当路由器） | **Priority**: P1",
+      "status": "in-progress | **Owner**: 小太阳 @codex61-sol（Phase A 实现），Siamese @gemini-argon（独立 review）；执行 thread `thread_mvosmqalhrabbmvd` | **Priority**: P1",
       "file": "F327-google-family-suite.md"
     },
     {
@@ -1947,8 +1947,20 @@
     {
       "id": "F332",
       "name": "经历参与判断 — 从共同经历到新情境的记忆",
-      "status": "in-progress (A1/A2/A3 读源修复已合入并通过 Alpha；其余设计/继承工作按原范围) | **Owner**: 小星星·Maine Coon (@codex-astra) | **Priority**: P1",
+      "status": "in-progress（读源修复、第2步目录及第1步画像主要路径已交；原1387的统计、三处文案和验证缺口转独立执行线程继续） | **Owner**: 小星星·Maine Coon (@codex-astra) | **Priority**: P1",
       "file": "F332-experience-informed-memory.md"
+    },
+    {
+      "id": "F333",
+      "name": "Shared MCP Process Lifecycle｜多猫共用 MCP 运行资源",
+      "status": "in-progress | **Owner**: 小星星·Maine Coon (@codex-astra, gpt-6-astra；整体与验收)；Phase B 实现：Sol6.1；审核：Sol5.6（Phase A 历史审核：Sonnet） | **Priority**: P1",
+      "file": "F333-shared-mcp-process-lifecycle.md"
+    },
+    {
+      "id": "F334",
+      "name": "Multi-Machine Cat Hosting｜分身不分家：猫在别的机器上干活，还是家里那只",
+      "status": "spec | **Owner**: Ragdoll (@opus55, claude-opus-5-5) | **Priority**: P2",
+      "file": "F334-multi-machine-cat-hosting.md"
     }
   ]
 }

@@ -49,7 +49,12 @@ import {
   type CodexAppServerApprovalsReviewer,
   closeCodexAppServerTransport,
 } from './codex-app-server-client-helpers.js';
-import { CodexAppServerRpcError, CodexAppServerTurnStartTimeoutError } from './codex-app-server-rpc-error.js';
+import {
+  CodexAppServerRequestError,
+  CodexAppServerRpcError,
+  CodexAppServerTurnStartTimeoutError,
+} from './codex-app-server-rpc-error.js';
+import { inspectCodexInput, readCodexTurnMetadata } from './codex-history-reader.js';
 
 export type {
   CodexAppServerLifecycleEvent,
@@ -124,6 +129,8 @@ export interface CodexAppServerRunInput {
   };
   imagePaths?: readonly string[];
   signal?: AbortSignal;
+  /** Runner-owned deadline for startup only; never times out a running turn. */
+  startupCheckSignal?: AbortSignal;
   /** Inactivity timeout. Zero keeps the F118 manual-cancel-only default. */
   timeoutMs?: number;
   /** Grace after turn/interrupt before the transport process is terminated. */
@@ -211,6 +218,7 @@ export function continuityEvidenceFromVerdict(verdict: CodexAppServerThreadVerdi
 export class CodexAppServerClient {
   private readonly pending = new Map<RequestId, PendingRequest>();
   private readonly observedTurnIds = new Map<string, Set<string>>();
+  private readonly completeTurnBaselines = new Set<string>();
   private readonly notifications = new CodexAppServerNotificationQueue();
   private nextRequestId = 1;
   private pumpPromise: Promise<void> | null = null;
@@ -283,21 +291,51 @@ export class CodexAppServerClient {
     );
     const timeoutMs = Math.max(0, input.timeoutMs ?? 0);
     const interruptGraceMs = Math.max(0, input.interruptGraceMs ?? DEFAULT_INTERRUPT_GRACE_MS);
+    let accountCheckComplete = false;
     const recoveryInstruction = input.recoveryInstruction?.trim();
     const abortHandler = (): void => {
       runtimeInteraction?.close('provider_cancelled');
+      if (!this.lifecycle.snapshot().turnStartSent) {
+        this.rejectPending(
+          input.signal?.reason instanceof Error ? input.signal.reason : new Error('Codex startup cancelled'),
+        );
+        void this.deps.wire.close().catch(() => {});
+        return;
+      }
       void this.lifecycle.interrupt(activeThreadId, activeTurnId, 'user_cancel', interruptGraceMs);
+    };
+    const startupAbortHandler = (): void => {
+      this.rejectPending(
+        input.startupCheckSignal?.reason instanceof Error
+          ? input.startupCheckSignal.reason
+          : new Error('Codex startup deadline exceeded'),
+      );
+      void this.deps.wire.close().catch(() => {});
     };
     const timeoutHandler = (): void => {
       void this.lifecycle.interrupt(activeThreadId, activeTurnId, 'timeout', interruptGraceMs);
     };
     input.signal?.addEventListener('abort', abortHandler, { once: true });
+    input.startupCheckSignal?.addEventListener('abort', startupAbortHandler, { once: true });
     const childSpawned = this.lifecycle.transition('child_spawned', { recoveryAttempt: input.recoveryAttempt ?? 0 });
     yield this.lifecycle.event(childSpawned);
     if (input.signal?.aborted) abortHandler();
     this.lifecycle.armInactivityTimeout(timeoutMs, timeoutHandler);
     try {
-      await this.request('initialize', {
+      input.signal?.throwIfAborted();
+      input.startupCheckSignal?.throwIfAborted();
+      const preflightRequest = (method: string, params: JsonObject) =>
+        this.request(method, params).catch((error) => {
+          if (
+            error instanceof CodexAppServerRpcError ||
+            error instanceof CodexLiveStartupCancelledError ||
+            input.signal?.aborted ||
+            input.startupCheckSignal?.aborted
+          )
+            throw error;
+          throw new CodexAppServerRequestError(method, error);
+        });
+      await preflightRequest('initialize', {
         clientInfo: { name: 'cat-cafe', title: `${deploymentDefaults.brand.displayName}`, version: '1' },
         capabilities: recoveryInstruction || input.collaborationMode || input.live ? { experimentalApi: true } : {},
       });
@@ -305,12 +343,15 @@ export class CodexAppServerClient {
       yield this.lifecycle.event(this.lifecycle.transition('initialized'));
       this.lifecycle.armInactivityTimeout(timeoutMs, timeoutHandler);
 
-      await input.validateConfiguration?.((method, params) => this.request(method, params), input.config ?? {});
-      await validateCodexAccountConfiguration(
-        this.deps.wire,
-        (method, params) => this.request(method, params),
-        input.config ?? {},
-      );
+      yield { type: 'app_server.account_check', stage: 'checking' };
+      input.startupCheckSignal?.throwIfAborted();
+      await input.validateConfiguration?.(preflightRequest, input.config ?? {});
+      await validateCodexAccountConfiguration(this.deps.wire, preflightRequest, input.config ?? {});
+      input.signal?.throwIfAborted();
+      input.startupCheckSignal?.throwIfAborted();
+      input.startupCheckSignal?.removeEventListener('abort', startupAbortHandler);
+      accountCheckComplete = true;
+      yield { type: 'app_server.account_check', stage: 'ready' };
 
       if (input.live) {
         // config/read without cwd sees global servers, while a resumed thread
@@ -348,11 +389,12 @@ export class CodexAppServerClient {
         };
       }
 
+      if (input.thread.kind === 'resume') this.completeTurnBaselines.delete(input.thread.threadId);
       const verdict = await resolveCodexAppServerThread({
         thread: input.thread,
         params: buildCodexAppServerThreadParams(
           input,
-          input.thread.kind === 'resume' ? { threadId: input.thread.threadId } : undefined,
+          input.thread.kind === 'resume' ? { threadId: input.thread.threadId, excludeTurns: true } : undefined,
         ),
         startParams: buildCodexAppServerThreadParams(input),
         requireExactResume: input.requireExactResume || Boolean(recoveryInstruction),
@@ -363,8 +405,17 @@ export class CodexAppServerClient {
         localLiveLease: false,
         request: (method, params) => this.request(method, params),
         now: this.deps.now ?? Date.now,
+        onResumeMetadata: async (threadId) => {
+          // The standalone pagination RPC is non-experimental. A resume's
+          // initialTurnsPage would require broadening the session capability set.
+          for await (const turn of readCodexTurnMetadata((method, params) => this.request(method, params), threadId)) {
+            this.rememberTurn(threadId, turn.id);
+          }
+          this.completeTurnBaselines.add(threadId);
+        },
       });
       const threadId = verdict.threadId;
+      if (verdict.kind === 'started' || verdict.kind === 'replaced') this.completeTurnBaselines.add(threadId);
       activeThreadId = threadId;
       if (input.collaborationMode) {
         const adopted = asCodexAppServerRecord(verdict.raw);
@@ -587,19 +638,8 @@ export class CodexAppServerClient {
               };
             }
           },
-          inspectInput: async (deliveryId) => {
-            const result = asCodexAppServerRecord(await this.request('thread/read', { threadId, includeTurns: true }));
-            const thread = asCodexAppServerRecord(result?.thread);
-            if (thread?.id !== threadId || !Array.isArray(thread.turns)) return 'unknown';
-            const turn = thread.turns.map(asCodexAppServerRecord).find((candidate) => candidate?.id === handle.turnId);
-            if (!Array.isArray(turn?.items)) return 'unknown';
-            return turn.items.some((value) => {
-              const item = asCodexAppServerRecord(value);
-              return item?.type === 'userMessage' && item.clientId === deliveryId;
-            })
-              ? 'accepted'
-              : 'unknown';
-          },
+          inspectInput: (deliveryId) =>
+            inspectCodexInput((method, params) => this.request(method, params), threadId, handle.turnId, deliveryId),
         });
         if (typeof release === 'function') releaseActiveRunDispatch = release;
       }
@@ -797,6 +837,7 @@ export class CodexAppServerClient {
       if (failed) yield this.lifecycle.event(failed);
       throw failure;
     } finally {
+      input.startupCheckSignal?.removeEventListener('abort', startupAbortHandler);
       activeRunDispatchOpen = false;
       inputReadCallbacks.clear();
       releaseActiveRunDispatch?.();
@@ -812,6 +853,7 @@ export class CodexAppServerClient {
         abortHandler,
         (error) => this.rejectPending(error),
         transportDisposition,
+        accountCheckComplete ? undefined : input.startupCheckSignal,
       );
       yield this.lifecycle.event(closing);
       yield this.lifecycle.event(closed);
@@ -901,7 +943,7 @@ export class CodexAppServerClient {
     if (typeof params?.threadId !== 'string' || typeof turn?.id !== 'string' || !turn.id) return;
     const alreadyObserved = this.observedTurnIds.get(params.threadId)?.has(turn.id);
     this.rememberTurn(params.threadId, turn.id);
-    if (alreadyObserved || turn.status !== 'inProgress') return;
+    if (alreadyObserved || turn.status !== 'inProgress' || !this.completeTurnBaselines.has(params.threadId)) return;
     const candidates = [...this.pending.values()].filter(
       (pending) => pending.method === 'turn/start' && pending.sent && pending.params.threadId === params.threadId,
     );
@@ -933,6 +975,7 @@ export class CodexAppServerClient {
               new CodexAppServerRpcError({
                 message: codexAppServerErrorMessage(message.error),
                 method: pending.method,
+                data: errorRecord?.data,
                 ...(typeof code === 'number' ? { code } : {}),
               }),
             );

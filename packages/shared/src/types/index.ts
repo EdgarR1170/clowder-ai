@@ -95,6 +95,8 @@ export {
   type AgentKeyFailureReason,
   isAgentKeyFailureReason,
 } from './agent-key-reasons.js';
+export type { ApprovalHistoryPage, ApprovalHistoryPageRequest } from './approval-history-page.js';
+export { compareApprovalHistoryId, compareApprovalHistoryItems } from './approval-history-page.js';
 export {
   type ApprovalCardRef,
   type ApprovalDecisionMode,
@@ -301,7 +303,7 @@ export {
 export type { CatAlternative, CatRoutingError } from './cat-routing.js';
 export { CatAlternativeSchema, CatRoutingErrorSchema } from './cat-routing.js';
 // F212: CLI error diagnostics (cross-package data contract; classifier/sanitizer impl stays in api)
-export type { CliDiagnostics, CliErrorReasonCode } from './cli-diagnostics.js';
+export type { CliDiagnostics, CliErrorReasonCode, CodexStartupRecovery } from './cli-diagnostics.js';
 export type { BuiltinAccountClient } from './client-routing.js';
 export {
   BUILTIN_ACCOUNT_CLIENT_FOR_ID,
@@ -333,7 +335,9 @@ export {
   isCloudBridgeRecoveryV1,
   isCloudBridgeRetryV1,
 } from './cloud-bridge-outbound-receipt.js';
+export { type CloudBridgeReturnV1, isCloudBridgeReturnV1 } from './cloud-bridge-return.js';
 export * from './collective.js';
+export * from './collective-channel.js';
 export * from './collective-collaboration.js';
 export * from './collective-decision-vote.js';
 export * from './collective-reaction.js';
@@ -487,6 +491,7 @@ export {
   unregisterConnectorDefinition,
 } from './connector.js';
 export {
+  type AssetContextAttachment,
   type CliOutputQuoteSource,
   CONTEXT_ATTACHMENT_COMMENT_MAX_LENGTH,
   CONTEXT_ATTACHMENT_MAX_COUNT,
@@ -1202,6 +1207,14 @@ export {
   type PawFeelDutyConfig,
   type PawFeelReconciliationCoverage,
 } from './paw-feel-duty.js';
+export type { PawFeelRepairBinding, PawFeelRepairRequest } from './paw-feel-repair-binding.js';
+export {
+  pawFeelRepairBinding,
+  pawFeelRepairBindingSchema,
+  pawFeelRepairRequest,
+  pawFeelRepairRequestSchema,
+  repairRequestForBinding,
+} from './paw-feel-repair-binding.js';
 // F276 owner-private people and relationship memory contracts
 export {
   type CandidateClaimDraft,
@@ -1692,6 +1705,7 @@ export type {
   ReviewAutomationState,
   SuggestedCrossPostAction,
   SuggestedCrossPostActionSource,
+  TaskExecutionRef,
   TaskItem,
   TaskKind,
   TaskProbeSpec,

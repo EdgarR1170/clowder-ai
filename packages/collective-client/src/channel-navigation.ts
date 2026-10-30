@@ -1,4 +1,4 @@
-import type { CollectiveEventEnvelope, CollectiveParticipant } from './client-types.js';
+import type { CollectiveChannelProjection, CollectiveEventEnvelope, CollectiveParticipant } from './client-types.js';
 
 export function eventChannelId(event: CollectiveEventEnvelope): string | undefined {
   return event.location?.channelId ?? (event.target.kind === 'channel' ? event.target.channelId : undefined);
@@ -7,9 +7,11 @@ export function eventChannelId(event: CollectiveEventEnvelope): string | undefin
 export function channelDestinations(
   events: readonly CollectiveEventEnvelope[],
   participants: readonly CollectiveParticipant[],
+  channels: readonly CollectiveChannelProjection[] = [],
 ) {
   const ids = new Set([
     'general',
+    ...channels.map((channel) => channel.channelId),
     ...events.flatMap((event) => eventChannelId(event) ?? []),
     ...participants.flatMap((member) => member.channelIds),
   ]);
@@ -20,13 +22,17 @@ export function channelDestinations(
   });
 }
 
-export function readChannelPosition(namespace: string): string {
+export function readSavedChannelPosition(namespace: string): string | undefined {
   try {
     const saved = window.localStorage.getItem(`collective-channel:${namespace}`);
-    return saved?.trim() && saved.length <= 160 ? saved : 'general';
+    return saved?.trim() && saved.length <= 160 ? saved : undefined;
   } catch {
-    return 'general';
+    return undefined;
   }
+}
+
+export function readChannelPosition(namespace: string): string {
+  return readSavedChannelPosition(namespace) ?? 'general';
 }
 
 export function readChannelTarget(search?: string) {
@@ -71,6 +77,14 @@ export function writeLibraryTarget() {
 export function saveChannelPosition(namespace: string, channelId: string) {
   try {
     window.localStorage.setItem(`collective-channel:${namespace}`, channelId);
+  } catch {
+    /* Navigation still works when browser storage is unavailable. */
+  }
+}
+
+export function clearChannelPosition(namespace: string) {
+  try {
+    window.localStorage.removeItem(`collective-channel:${namespace}`);
   } catch {
     /* Navigation still works when browser storage is unavailable. */
   }

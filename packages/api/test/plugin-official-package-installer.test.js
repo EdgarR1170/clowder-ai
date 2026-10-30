@@ -31,7 +31,6 @@ test('installs only the exact catalog artifact and admits schemas from those byt
   assert.deepEqual(installed, {
     pluginInstanceId: 'pi_official',
     packageDigest: archive.integrity,
-    grantRevision: 1,
   });
   const snapshot = await store.snapshot();
   assert.equal(snapshot.packages.length, 1);
@@ -66,21 +65,22 @@ test('installs a package declaring the contract implemented by this Host', async
   assert.equal((await store.snapshot()).packages[0].contractVersion, PLUGIN_CONTRACT_PACKAGE_VERSION);
 });
 
-test('installs an in-range declaration absent from the previous release list', async () => {
-  const contractVersion = '0.1.0-beta.14';
-  const archive = await packageArchive({ packageManifest: manifest({ contractVersion }) });
-  const entry = catalogEntry(archive.integrity);
-  const { store, installer } = await harness(archive, entry);
+for (const contractVersion of ['0.1.0-beta.14', '0.3.1-beta.1']) {
+  test(`installs the in-range historical declaration ${contractVersion}`, async () => {
+    const archive = await packageArchive({ packageManifest: manifest({ contractVersion }) });
+    const entry = catalogEntry(archive.integrity);
+    const { store, installer } = await harness(archive, entry);
 
-  const installed = await installer.install(entry.catalogId, releaseFence(entry));
+    const installed = await installer.install(entry.catalogId, releaseFence(entry));
 
-  const snapshot = await store.snapshot();
-  assert.equal(snapshot.packages[0].manifest.contractVersion, contractVersion);
-  assert.equal(snapshot.instances[0].pluginInstanceId, installed.pluginInstanceId);
-  assert.equal(snapshot.packages[0].packageDigest, archive.integrity);
-});
+    const snapshot = await store.snapshot();
+    assert.equal(snapshot.packages[0].manifest.contractVersion, contractVersion);
+    assert.equal(snapshot.instances[0].pluginInstanceId, installed.pluginInstanceId);
+    assert.equal(snapshot.packages[0].packageDigest, archive.integrity);
+  });
+}
 
-for (const contractVersion of ['0.1.0-beta.12', '0.2.1-beta.1', '0.2.1']) {
+for (const contractVersion of ['0.1.0-beta.12', '0.3.1-candidate.1', '0.3.1']) {
   test(`quarantines ${contractVersion} outside the Host supported contract range`, async () => {
     const packageManifest = manifest({ contractVersion });
     const archive = await packageArchive({ packageManifest });
@@ -102,7 +102,6 @@ for (const contractVersion of ['0.1.0-beta.12', '0.2.1-beta.1', '0.2.1']) {
     const snapshot = await store.snapshot();
     assert.deepEqual(snapshot.instances, []);
     assert.deepEqual(snapshot.packages, []);
-    assert.deepEqual(snapshot.grants, []);
     const [rejected] = await quarantines.list();
     assert.equal(rejected.pluginId, entry.pluginId);
     assert.equal(rejected.packageDigest, archive.integrity);
@@ -167,7 +166,6 @@ test('explicit update replaces a stopped older package in place and preserves it
   assert.deepEqual(updated, {
     pluginInstanceId: 'pi_official',
     packageDigest: nextArchive.integrity,
-    grantRevision: 2,
   });
   const snapshot = await store.snapshot();
   assert.equal(snapshot.instances.filter((instance) => instance.lifecycleState === 'installed').length, 1);

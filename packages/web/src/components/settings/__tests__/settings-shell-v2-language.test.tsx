@@ -28,6 +28,7 @@ vi.mock('../plugin-manager/plugin-manager-design-gate', () => ({ usesFixedPlugin
 import { SHELL_LANGUAGE_STORAGE_KEY, writeShellLanguage } from '../../shell/shell-language';
 import { writeShellPresentation } from '../../shell/shell-presentation';
 import { SettingsShell } from '../SettingsShell';
+import { SETTINGS_IA } from '../settings-ia';
 
 describe('F322 设置与管理 catalogue in both languages', () => {
   let host: HTMLDivElement;
@@ -70,12 +71,15 @@ describe('F322 设置与管理 catalogue in both languages', () => {
     expect(host.querySelector('button[aria-label="固定「主题」到窄栏"]')).not.toBeNull();
   });
 
-  it('reads the approved English names once the language is English, with the same eleven entries', () => {
+  it('reads the approved English names with You before the eleven existing entries', () => {
     writeShellLanguage('en');
     render('s=theme');
     expect(host.querySelector('h1')?.textContent).toBe('Settings');
     expect(host.querySelector('nav[aria-label="Settings"]')).not.toBeNull();
-    expect(host.querySelectorAll('[data-testid^="settings-entry-"]')).toHaveLength(11);
+    const entries = host.querySelectorAll('[data-testid^="settings-entry-"]');
+    expect(entries).toHaveLength(12);
+    expect(entries[0]?.getAttribute('data-testid')).toBe('settings-entry-you');
+    expect(entryText('you')).toMatch(/You$/);
     expect(
       [
         'team',
@@ -115,6 +119,34 @@ describe('F322 设置与管理 catalogue in both languages', () => {
     render('s=theme');
     expect(buttonNamed('Unpin "Theme" from the narrow rail')).not.toBeNull();
     expect(buttonNamed('从窄栏取消固定「主题」')).toBeNull(); // not the Chinese sentence in English mode
+  });
+
+  it('localizes the mobile navigation, team tabs and workspace action together', () => {
+    writeShellLanguage('en');
+    render('s=members');
+    expect(host.querySelector('button[aria-controls="settings-mobile-navigation"]')?.textContent).toBe(
+      'Settings navigation',
+    );
+    expect(host.querySelector('[data-testid="settings-tab-concierge"]')?.textContent).toBe('Cat Ball');
+    expect(host.querySelector('[data-testid="settings-team-workspace"]')?.textContent).toBe(
+      'Member capabilities & routing',
+    );
+    expect(host.querySelector('[role="tablist"]')?.getAttribute('aria-label')).toBe('Cat team sections');
+    act(() => buttonNamed('Pin "Member capabilities & routing" to the narrow rail')?.click());
+    expect(pins.pin).toHaveBeenLastCalledWith('dest:team-workspace');
+  });
+
+  it('uses English for every known second-level menu, including its accessible names', () => {
+    writeShellLanguage('en');
+    for (const entry of SETTINGS_IA) {
+      if (entry.destination.kind !== 'sections') continue;
+      const section = entry.destination.items.find((item) => item.kind === 'section');
+      if (!section || section.kind !== 'section') throw Error('missing section');
+      render(`s=${section.sectionId}`);
+      const menus = [...host.querySelectorAll('[role="tablist"], [data-testid="settings-team-workspace"]')];
+      expect(menus.map((node) => node.textContent).join(' '), entry.id).not.toMatch(/\p{Script=Han}/u);
+      expect(menus.map((node) => node.getAttribute('aria-label')).join(' '), entry.id).not.toMatch(/\p{Script=Han}/u);
+    }
   });
 
   it('changing the language swaps the words under the same elements: selection, scroll frame and content stay', () => {

@@ -1,4 +1,10 @@
+import {
+  type CollectiveChannelCreateResponse,
+  collectiveChannelCreateResponseSchema,
+  normalizeCollectiveChannelName,
+} from '@cat-cafe/shared';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { readSavedChannelPosition } from './channel-navigation.js';
 import type { ClientSnapshot, InviteResult, PairingIntentResult } from './client-types.js';
 import { phaseForHuman } from './human-auth-flow.js';
 import { collectiveClientNamespace } from './human-send-custody.js';
@@ -29,10 +35,22 @@ export function useCollectiveClient() {
   const activeCollectiveId = snapshot.collective?.collectiveId;
   const activeCollectiveName = snapshot.collective?.name;
   const activeCollectiveRole = snapshot.collective?.role;
+  const activeNamespace = collectiveClientNamespace(snapshot);
+  const activeServiceInstanceId = snapshot.meta?.serviceInstanceId;
+  const channelCapability = snapshot.meta?.capabilities?.channels;
   const currentNamespace = useRef<string>();
-  currentNamespace.current = collectiveClientNamespace(snapshot);
-  const { token, request, binaryRequest, loadMe, invitationMode, bootstrap, authenticate, configureProvider } =
-    useHumanAuthSession(snapshot, setSnapshot);
+  currentNamespace.current = activeNamespace;
+  const {
+    token,
+    request,
+    binaryRequest,
+    loadMe,
+    invitationMode,
+    bootstrap,
+    authenticate,
+    configureProvider,
+    switchAccount: leaveHumanSession,
+  } = useHumanAuthSession(snapshot, setSnapshot);
   const { refreshEvents, recheckScope, cancelRefresh } = useCollectiveRefresh(
     snapshot,
     setSnapshot,
@@ -40,6 +58,11 @@ export function useCollectiveClient() {
     loadMe,
     token,
   );
+  const switchAccount = useCallback(() => {
+    cancelRefresh();
+    currentNamespace.current = undefined;
+    leaveHumanSession();
+  }, [cancelRefresh, leaveHumanSession]);
 
   const createCollective = useCallback(
     async (name: string) => {
@@ -61,6 +84,7 @@ export function useCollectiveClient() {
         collective,
         restrictedScope: undefined,
         events: [],
+        channels: undefined,
         collaboration: undefined,
         participants: undefined,
         members: undefined,
@@ -70,6 +94,50 @@ export function useCollectiveClient() {
   );
 
   const sendMessage = useCollectiveSend({ snapshot, setSnapshot, currentNamespace, request, refresh: refreshEvents });
+
+  const createChannel = useCallback(
+    async (name: string, clientOperationId: string) => {
+      if (
+        !activeCollectiveId ||
+        !activeServiceInstanceId ||
+        !activeNamespace ||
+        activeNamespace !== currentNamespace.current ||
+        channelCapability !== 1
+      ) {
+        throw new Error('当前 Service 还不能新建频道');
+      }
+      const result = collectiveChannelCreateResponseSchema.parse(
+        await request<CollectiveChannelCreateResponse>('/api/channels', {
+          method: 'POST',
+          body: JSON.stringify({
+            collectiveId: activeCollectiveId,
+            name: normalizeCollectiveChannelName(name),
+            clientOperationId,
+          }),
+        }),
+      );
+      if (
+        result.channel.serviceInstanceId !== activeServiceInstanceId ||
+        result.channel.collectiveId !== activeCollectiveId
+      ) {
+        throw new Error('Service 返回了不属于当前 Collective 的频道');
+      }
+      if (activeNamespace !== currentNamespace.current) return undefined;
+      setSnapshot((current) =>
+        collectiveClientNamespace(current) === activeNamespace
+          ? {
+              ...current,
+              channels: [
+                ...(current.channels ?? []).filter((channel) => channel.channelId !== result.channel.channelId),
+                result.channel,
+              ],
+            }
+          : current,
+      );
+      return result;
+    },
+    [activeCollectiveId, activeNamespace, activeServiceInstanceId, channelCapability, request],
+  );
 
   const createInvite = useCallback(async () => {
     if (!snapshot.collective) return;
@@ -105,16 +173,20 @@ export function useCollectiveClient() {
       if (!collective) return;
       if (snapshot.collective?.collectiveId === collectiveId) return;
       cancelRefresh();
-      currentNamespace.current = collectiveClientNamespace({ ...snapshot, collective });
+      const targetNamespace = collectiveClientNamespace({ ...snapshot, collective });
+      currentNamespace.current = targetNamespace;
       const url = new URL(location.href);
       url.searchParams.set('collectiveId', collectiveId);
-      url.searchParams.delete('channelId');
+      const savedChannelId = targetNamespace ? readSavedChannelPosition(targetNamespace) : undefined;
+      if (savedChannelId) url.searchParams.set('channelId', savedChannelId);
+      else url.searchParams.delete('channelId');
       history.replaceState(null, '', url);
       setSnapshot((current) => ({
         ...current,
         collective,
         restrictedScope: undefined,
         events: [],
+        channels: undefined,
         collaboration: undefined,
         participants: undefined,
         members: undefined,
@@ -206,15 +278,20 @@ export function useCollectiveClient() {
   const artifacts = useCollectiveArtifacts(snapshot, request, refreshEvents);
   const expressionServiceId = snapshot.meta?.serviceInstanceId;
   const expressionCollectiveId = snapshot.collective?.collectiveId;
+  const expressionHumanId = snapshot.me?.human.humanId;
   const expression = useMemo(
     () =>
-      expressionServiceId && expressionCollectiveId
+      expressionServiceId && expressionCollectiveId && expressionHumanId
         ? createMessageExpressionPort(
-            { serviceInstanceId: expressionServiceId, collectiveId: expressionCollectiveId },
+            {
+              serviceInstanceId: expressionServiceId,
+              collectiveId: expressionCollectiveId,
+              humanId: expressionHumanId,
+            },
             binaryRequest,
           )
         : undefined,
-    [expressionServiceId, expressionCollectiveId, binaryRequest],
+    [expressionServiceId, expressionCollectiveId, expressionHumanId, binaryRequest],
   );
 
   return {
@@ -226,7 +303,9 @@ export function useCollectiveClient() {
     bootstrap,
     authenticate,
     configureProvider,
+    switchAccount,
     createCollective,
+    createChannel,
     sendMessage,
     createInvite,
     readLeaveReadiness,

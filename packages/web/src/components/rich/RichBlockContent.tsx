@@ -1,8 +1,11 @@
 'use client';
 
 import { type ConnectorSource, isPersonMemoryProposalCardBlock } from '@cat-cafe/shared';
+import { RichCardContent } from '@cat-cafe/ui';
 import type { PublishedMessageCoordinate } from '@/components/content-review/usePublishedContent';
+import { MarkdownContent } from '@/components/MarkdownContent';
 import { isCorrectionPublication } from '@/components/memory/page/read-correction-approval';
+import { MessageSearchAnswerCard } from '@/components/message-search/MessageSearchAnswerCard';
 import { useShellCopy } from '@/components/shell/shell-copy';
 import type { RichBlock } from '@/stores/chat-types';
 import { AudioBlock } from './AudioBlock';
@@ -39,14 +42,19 @@ function RichCardRenderer({
   messageSource,
   confirmations,
   publication,
+  catId,
 }: {
   block: Extract<RichBlock, { kind: 'card' }>;
   messageId?: string;
   messageSource?: ConnectorSource;
   confirmations?: CardConfirmationEntry[];
   publication?: PublishedMessageCoordinate;
+  catId?: string;
 }) {
-  if (block.meta?.kind === 'work_reference') return <LivingWorkCard block={block} messageId={messageId} />;
+  if (block.meta?.domain === 'message-search-answer')
+    return <MessageSearchAnswerCard messageId={messageId} blockId={block.id} />;
+  if (block.meta?.kind === 'work_reference')
+    return <LivingWorkCard block={block} messageId={messageId} catId={catId} />;
   if (isDomainApprovalPublication(block)) return <OriginalDomainApprovalCard block={block} coordinate={publication} />;
   if (isCorrectionPublication(block)) return <OriginalMemoryCorrectionCard block={block} coordinate={publication} />;
   if (isEvalRepairPublication(block)) return <OriginalEvalRepairCard block={block} coordinate={publication} />;
@@ -74,6 +82,10 @@ function RichCardRenderer({
   const metaKind = (block.meta as { kind?: string } | undefined)?.kind;
   const isTrustedCallbackAuth = metaKind === 'callback_auth_failure' && messageSource?.connector === 'callback-auth';
   if (isTrustedCallbackAuth) return <CallbackAuthFailureBlock block={block} />;
+  if (!block.meta && !block.actions?.length)
+    return (
+      <RichCardContent block={block} markdown={(source) => <MarkdownContent content={source} disableCommandPrefix />} />
+    );
   return <CardBlock block={block} messageId={messageId} confirmations={confirmations} />;
 }
 
@@ -117,6 +129,7 @@ export function RichBlockRenderer({
           messageSource={messageSource}
           confirmations={confirmations}
           publication={publication}
+          catId={catId}
         />
       );
     case 'diff':
@@ -149,6 +162,7 @@ export function RichBlockRenderer({
           messageId={messageId}
           sourceThreadId={sourceThreadId}
           sourceMessageIds={sourceMessageIds}
+          catId={catId}
         />
       );
     default:

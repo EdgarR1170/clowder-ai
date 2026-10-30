@@ -3,9 +3,12 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
 import { build } from 'vite';
-import { chromium } from '../../../ppt-forge/node_modules/playwright/index.mjs';
 import { managerDot } from './f247-dot-entry.fixtures.mjs';
+import '../../../api/test/helpers/setup-cat-registry.js';
+import { cloudReturnReadRoutes } from '../../../api/dist/routes/cloud-return-read.js';
+import { cloudReturnHarness, configureCats } from '../../../api/test/helpers/cloud-return-harness.js';
 
 // Real recovery controller, chooser, Plugin Manager, confirmation and navigation.
 // API wire states are controlled; actual archive/runner/preservation is tested separately.
@@ -33,6 +36,7 @@ before(async () => {
       },
     },
   });
+
   const outputs = Array.isArray(result) ? result.flatMap((value) => value.output) : result.output;
   script = outputs.find((value) => value.type === 'chunk' && value.isEntry).code;
   css = outputs
@@ -46,7 +50,7 @@ after(async () => {
   process.chdir(previousCwd);
 });
 
-function pro(installed, enabled) {
+function pro(installed, enabled, operationState) {
   return {
     ...managerDot(installed, enabled, true, true),
     pluginId,
@@ -58,11 +62,25 @@ function pro(installed, enabled) {
       trust: 'official',
     },
     description: '连接 Chrome 并授权指定 ChatGPT 会话。',
-    availableVersion: '0.1.0-alpha.6',
-    installedVersion: installed ? '0.1.0-alpha.6' : null,
+    availableVersion: '0.1.0-alpha.8',
+    installedVersion: installed ? '0.1.0-alpha.8' : null,
     steps: [{ text: '安装并启用插件，再准备 Chrome 连接；安装不表示浏览器已连接。' }],
     configFields: installed
       ? [
+          {
+            key: 'personalChromeAuthorizations',
+            kind: 'operation',
+            label: 'ChatGPT conversation authorizations',
+            currentValue: null,
+            required: false,
+            sensitive: false,
+            operationState,
+            actions: [{ id: 'list', label: 'Authorized conversations', render: 'status', resultRender: 'rows' }],
+            rowActions: [
+              { id: 'check-page', label: '检查会话页面' },
+              { id: 'revoke', label: 'Revoke authorization', confirm: 'Revoke this authorization?' },
+            ],
+          },
           {
             key: 'hostChromeSetup',
             kind: 'operation',
@@ -99,7 +117,9 @@ for (const { presentation, width } of ['v1', 'v2'].flatMap((presentation) =>
       authorized = false,
       bound = false,
       prepared = false,
-      connected = false;
+      connected = false,
+      pageReloadRequired = false;
+    let authOperationState = { currentAction: 'list', updatedAt: 0 };
     const writes = [],
       errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
@@ -118,6 +138,12 @@ for (const { presentation, width } of ['v1', 'v2'].flatMap((presentation) =>
           body: '<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/proof.css"><div id="root"></div><script type="module" src="/proof.js"></script>',
         });
       if (request.method() !== 'GET') writes.push(url.pathname);
+      if (request.method() === 'POST' && url.pathname.startsWith(`${actionBase}personalChromeAuthorizations/`)) {
+        authOperationState = {
+          currentAction: url.pathname.split('/').at(-1),
+          updatedAt: authOperationState.updatedAt + 1,
+        };
+      }
       if (url.pathname === '/api/session') return answer({ userId: 'isolated-owner', csrfToken: 'fixture-csrf' });
       if (url.pathname.endsWith('/cloud-bindings')) {
         if (request.method() === 'PATCH') {
@@ -143,29 +169,52 @@ for (const { presentation, width } of ['v1', 'v2'].flatMap((presentation) =>
       }
       const catalog = { status: 'fresh', refreshedAt: 1 };
       if (url.pathname === '/api/plugin-manager/plugins' || url.pathname === '/api/plugin-manager/plugins/_local')
-        return answer({ plugins: [pro(installed, enabled)], catalog });
+        return answer({ plugins: [pro(installed, enabled, authOperationState)], catalog });
       if (url.pathname.endsWith('/documentation')) return answer({});
       if (url.pathname.endsWith('/contributions/tools')) return answer({ pluginId, tools: [] });
       if (
         url.pathname === `/api/plugin-manager/plugins/${pluginId}` ||
         url.pathname === `/api/plugin-manager/plugins/_local/${pluginId}`
       )
-        return answer({ plugin: pro(installed, enabled), catalog });
+        return answer({ plugin: pro(installed, enabled, authOperationState), catalog });
       if (url.pathname === `${actionBase}personalChromeAuthorizations/list`)
         return installed
           ? answer({
               ok: true,
               render: 'rows',
-              data: { rows: authorized ? [{ key: 'retained-pro', label: '原来授权的会话' }] : [] },
+              data: {
+                rows: authorized
+                  ? [
+                      {
+                        key: 'retained-pro',
+                        label: '原来授权的会话',
+                        actions: [
+                          { action: 'revoke', input: { conversationId: 'retained-pro' } },
+                          { action: 'check-page', input: { conversationId: 'retained-pro' } },
+                        ],
+                      },
+                    ]
+                  : [],
+              },
             })
           : answer({ error: `Plugin '${pluginId}' is not installed` }, 404);
+      if (url.pathname === `${actionBase}personalChromeAuthorizations/check-page`) {
+        assert.deepEqual(request.postDataJSON(), { conversationId: 'retained-pro' });
+        pageReloadRequired = false;
+        return answer({
+          ok: true,
+          render: 'status',
+          label: '原对话页面已就绪（未发送消息）',
+          data: { health: { status: 'ready' } },
+        });
+      }
       if (url.pathname === `${actionBase}personalChromeAuthorizations/status`)
         return answer({
           ok: true,
           render: 'status',
           data: {
             helper: { state: connected ? 'connected' : prepared ? 'unreachable' : 'not_installed' },
-            delivery: { reloadRequired: prepared && !connected },
+            delivery: { reloadRequired: prepared && !connected, pageReloadRequired },
           },
         });
       if (url.pathname.startsWith(`${actionBase}hostChromeSetup/`)) {
@@ -229,9 +278,79 @@ for (const { presentation, width } of ['v1', 'v2'].flatMap((presentation) =>
       await recovery.getByRole('button', { name: '我已授权，重新检查', exact: true }).click();
       await recovery.getByText('原来授权的会话', { exact: true }).waitFor();
       assert.equal(bound, false, 'discovering an authorization never binds it automatically');
+      pageReloadRequired = true; // A later exact probe observed an outdated conversation page.
+      await page.reload();
+      await recovery.getByText(/原对话页面仍在使用旧连接/).waitFor();
+      assert.equal(await recovery.getByText(/Chrome 扩展需要重载/).count(), 0);
+      assert.equal(await recovery.locator('[data-recovery-primary]').isDisabled(), true);
+      assert.equal(bound, false);
+      assert.equal(
+        writes.some((value) => value.endsWith('/retry')),
+        false,
+      );
+      if (process.env.F247_PRO_EVIDENCE_DIR) {
+        await mkdir(process.env.F247_PRO_EVIDENCE_DIR, { recursive: true });
+        await page.screenshot({
+          path: path.join(process.env.F247_PRO_EVIDENCE_DIR, `page-reload-${presentation}-${width}.png`),
+          fullPage: true,
+        });
+      }
+      // The owner has reloaded that original ChatGPT page; explicitly check its row in Settings.
+      await recovery.getByRole('link', { name: '检查 Chrome 连接', exact: true }).click();
+      const authRow = await page.getByTestId(`${pluginId}-row-retained-pro`).elementHandle();
+      assert.ok(authRow);
+      const listedBeforeCheck = writes.filter(
+        (value) => value === `${actionBase}personalChromeAuthorizations/list`,
+      ).length;
+      const stateBeforeCheck = authOperationState.updatedAt;
+      const detailRefresh = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          response.request().method() === 'GET' &&
+          [`/api/plugin-manager/plugins/${pluginId}`, `/api/plugin-manager/plugins/_local/${pluginId}`].includes(
+            url.pathname,
+          )
+        );
+      });
+      await page.getByRole('button', { name: '检查会话页面', exact: true }).click();
+      const refreshedDetail = await (await detailRefresh).json();
+      assert.ok(
+        refreshedDetail.plugin.configFields.find((field) => field.key === 'personalChromeAuthorizations').operationState
+          .updatedAt > stateBeforeCheck,
+        'the real detail callback must observe the advanced operation state',
+      );
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const checkedRow = page.getByTestId(`${pluginId}-row-retained-pro`);
+      await checkedRow.getByRole('status').filter({ hasText: '原对话页面已就绪（未发送消息）' }).waitFor();
+      assert.equal(
+        await checkedRow.getByRole('status').evaluate((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.top < innerHeight && rect.bottom > 0;
+        }),
+        true,
+        'row feedback stays beside the clicked conversation in the viewport',
+      );
+      if (width === 390) {
+        const title = await checkedRow.locator('p').first().boundingBox();
+        assert.ok(title.width > 120, 'mobile conversation titles retain readable width');
+      }
+      assert.equal(await authRow.evaluate((row) => row.isConnected), true, 'runtime-state refresh must retain the row');
+      assert.equal(
+        writes.filter((value) => value === `${actionBase}personalChromeAuthorizations/list`).length,
+        listedBeforeCheck,
+        'detail state refresh must not reset or re-list the operation',
+      );
+      if (process.env.F247_PRO_EVIDENCE_DIR) {
+        await page.screenshot({
+          path: path.join(process.env.F247_PRO_EVIDENCE_DIR, `page-check-${presentation}-${width}.png`),
+          fullPage: true,
+        });
+      }
+      await page.goBack();
+      await recovery.getByText('原来授权的会话', { exact: true }).waitFor();
       // Bind through the thread chooser; sending a production message is outside this proof.
       const chooser = page.getByTestId('cloud-conversation-link');
-      await chooser.getByRole('button', { name: '重新检查', exact: true }).click();
+      await chooser.getByRole('radio').waitFor();
       await chooser.getByRole('radio').check();
       await chooser.getByRole('button', { name: '连接这个会话', exact: true }).click();
       await chooser.locator('[data-route-status="connected"]').waitFor();
@@ -252,5 +371,157 @@ for (const { presentation, width } of ['v1', 'v2'].flatMap((presentation) =>
       }
     } finally {
       await page.close();
+    }
+  });
+
+for (const width of [1440, 390])
+  test(`authenticated Pro reply settles the notice and recovery; paged refresh restores its exact proof at ${width}px`, async () => {
+    configureCats(['gpt-pro']);
+    const h = await cloudReturnHarness();
+    await h.app.register(cloudReturnReadRoutes, {
+      messageStore: h.messageStore,
+      threadStore: h.threadStore,
+    });
+    await h.grant('gpt-pro');
+    const { secret } = await h.agentKeyRegistry.issue('gpt-pro', 'alice', { scope: 'cloud-conversation' });
+    const source = { ...h.source, type: 'assistant', content: '请回复这条新的隔离测试消息。' };
+    const outbound = {
+      v: 1,
+      sourceMessageId: source.id,
+      sourceSender: { kind: 'cat', id: 'codex' },
+      targetCatId: 'gpt-pro',
+      dispatchInvocationId: 'inv',
+      status: 'unknown',
+      transport: 'host',
+      idempotency: { keyKind: 'source_message_id', disposition: 'fresh' },
+    };
+    const notice = {
+      id: 'notice121',
+      type: 'connector',
+      replyTo: source.id,
+      timestamp: 1100,
+      content: '投递给 Pro 的结果未知，请查看原对话。',
+      source: {
+        connector: 'cloud-bridge-status',
+        label: '云端猫投递',
+        icon: 'info',
+        meta: { noticeTone: 'warning', cloudBridgeOutboundReceipt: outbound },
+      },
+    };
+    const placeholder = {
+      id: 'placeholder120',
+      type: 'assistant',
+      from: { kind: 'agent', catId: 'gpt-pro' },
+      catId: 'gpt-pro',
+      replyTo: source.id,
+      content: '',
+      isStreaming: true,
+      timestamp: 1001,
+    };
+    const page = await browser.newPage({ viewport: { width, height: 1000 } });
+    page.setDefaultTimeout(7000);
+    const errors = [],
+      requests = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.route('**/*', async (route) => {
+      const request = route.request(),
+        url = new URL(request.url());
+      assert.equal(url.origin, origin, 'no live account, Chrome or runtime endpoint');
+      const answer = (body, status = 200) =>
+        route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+      if (url.pathname === '/proof.js') return route.fulfill({ contentType: 'text/javascript', body: script });
+      if (url.pathname === '/proof.css') return route.fulfill({ contentType: 'text/css', body: css });
+      if (!url.pathname.startsWith('/api/'))
+        return route.fulfill({
+          contentType: 'text/html',
+          body: '<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/proof.css"><div id="root"></div><script type="module" src="/proof.js"></script>',
+        });
+      requests.push({ path: url.pathname, method: request.method() });
+      if (url.pathname === '/api/reply-journey') return answer({ threadId: h.thread.id, source, placeholder, notice });
+      if (url.pathname === '/api/session') return answer({ userId: 'alice', csrfToken: 'isolated-fixture' });
+      if (url.pathname.endsWith('/cloud-return')) {
+        const response = await h.app.inject({
+          method: 'GET',
+          url: `${url.pathname}${url.search}`,
+          headers: { 'x-cat-cafe-user': 'alice' },
+        });
+        return route.fulfill({ status: response.statusCode, contentType: 'application/json', body: response.body });
+      }
+      if (url.pathname.endsWith('/cloud-bindings')) return answer({ bindings: {} });
+      if (url.pathname.endsWith('/personalChromeAuthorizations/list')) return answer({ rows: [] });
+      return answer({});
+    });
+    try {
+      await page.goto(`${origin}/reply-state`);
+      const warning = page.getByText(notice.content, { exact: true });
+      await warning.waitFor();
+      assert.equal(
+        await page.locator('[data-cloud-logical-status]').count(),
+        0,
+        'empty streaming placeholder does not settle',
+      );
+      const posted = await h.post(secret, { content: '收到，这是已认证的隔离 Pro 回信。', replyTo: source.id });
+      assert.equal(posted.statusCode, 200);
+      const wire = h.broadcasts.find((event) => event.message.messageId === posted.json().messageId).message;
+      const stored = await h.messageStore.getById(wire.messageId);
+      assert.deepEqual(wire.extra.cloudBridgeReturn, stored.extra.cloudBridgeReturn);
+      const before = JSON.stringify([
+        await h.messageStore.getByThread(h.thread.id),
+        await h.grantStore.claim(h.scope('gpt-pro')),
+      ]);
+      await page.evaluate(
+        (event) => window.dispatchEvent(new CustomEvent('reply-journey-return', { detail: event })),
+        wire,
+      );
+      await page.locator('[data-cloud-logical-status="replied"]').first().waitFor();
+      assert.equal(
+        await page.getByText('已收到 Pro 回复', { exact: true }).count(),
+        2,
+        'notice and current-source recovery share logical truth',
+      );
+      assert.equal(await warning.count(), 0, 'original unknown-warning body is replaced');
+      assert.equal(await page.getByText('本次浏览器 Host 回执未确认', { exact: true }).count(), 2);
+      await page.locator('[data-cloud-outbound-status="unknown"]').waitFor();
+      assert.equal(await page.locator('[data-recovery-primary]').count(), 0);
+      await page.getByRole('button', { name: '查看回复', exact: true }).first().click();
+      assert.equal(await page.getByTestId('reply-navigation').textContent(), stored.id);
+      if (process.env.F247_PRO_EVIDENCE_DIR) {
+        await mkdir(process.env.F247_PRO_EVIDENCE_DIR, { recursive: true });
+        await page.screenshot({
+          path: path.join(process.env.F247_PRO_EVIDENCE_DIR, `logical-reply-${width}.png`),
+          fullPage: true,
+        });
+      }
+      await page.reload();
+      await page.locator('[data-cloud-logical-status="replied"]').first().waitFor();
+      assert.equal(await page.getByTestId('actual-return').count(), 0, 'the reply is outside this loaded page');
+      await page.getByRole('button', { name: '查看回复', exact: true }).first().click();
+      assert.equal(
+        await page.getByTestId('reply-navigation').textContent(),
+        stored.id,
+        'owner lookup restores the exact reply anchor after refresh',
+      );
+      assert.equal(
+        JSON.stringify([await h.messageStore.getByThread(h.thread.id), await h.grantStore.claim(h.scope('gpt-pro'))]),
+        before,
+        'render and restoration are read-only',
+      );
+      assert.equal(
+        requests.some(
+          (request) =>
+            request.method !== 'GET' &&
+            request.path !== '/api/session' &&
+            !(request.method === 'POST' && request.path.endsWith('/personalChromeAuthorizations/list')),
+        ),
+        false,
+        `no send, retry, binding or authorization mutation: ${JSON.stringify(requests)}`,
+      );
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      assert.deepEqual(outbound, notice.source.meta.cloudBridgeOutboundReceipt);
+      assert.equal(outbound.hostMessageId, undefined);
+      assert.deepEqual(errors, []);
+    } finally {
+      await page.close();
+      await h.app.close();
     }
   });

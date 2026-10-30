@@ -53,6 +53,7 @@ import { useFirstRealMessageSync } from './first-run-quest/useFirstRealMessageSy
 import { BootcampIcon } from './icons/BootcampIcon';
 import { PawIcon } from './icons/PawIcon';
 import { MessageSearchOverlay } from './message-search/MessageSearchOverlay';
+import { openMessageFindDestination, restoreFindWorkspaceOrigin } from './message-search/message-find-destinations';
 import { useMessageSearchHost } from './message-search/useMessageSearchHost';
 import { NewConversationPage } from './new-conversation/NewConversationPage';
 import { DEMO_SETTINGS_URL } from './onboarding-demo/demo-story';
@@ -199,7 +200,7 @@ function InteractiveChatContainer({ threadId }: ChatContainerProps) {
   const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
   // AC-6: research=multi hint from Signal study "多猫研究" button
   const isResearchMode = searchParams?.get('research') === 'multi';
-  const { clearTasks } = useTaskStore();
+  const { clearTasks } = useTaskStore(useShallow((state) => ({ clearTasks: state.clearTasks })));
   const { cats, hasFetched: registryKnown, isLoading: registryRefreshing } = useCatData();
   const isV2 = useShellPresentation() === 'v2';
   const conversationViewQueue = useChatStore((state) => scopedQueue(state, threadId)) ?? EMPTY_CONVERSATION_QUEUE;
@@ -439,6 +440,8 @@ function InteractiveChatContainer({ threadId }: ChatContainerProps) {
     threadId,
     pushThreadRoute: navigateToThread,
     available: messageSearchAvailable,
+    onOpenDestination: openMessageFindDestination,
+    beforeFindReturn: restoreFindWorkspaceOrigin,
   });
 
   useEffect(() => {

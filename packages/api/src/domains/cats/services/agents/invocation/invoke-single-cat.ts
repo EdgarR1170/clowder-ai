@@ -54,6 +54,8 @@ import {
   type SessionRecord,
 } from '@cat-cafe/shared';
 import { context, SpanStatusCode, trace } from '@opentelemetry/api';
+import { bindInvocationPluginMcpView } from '../../../../../config/capabilities/invocation-plugin-mcp-view.js';
+import { pluginMcpExposureProject } from '../../../../../config/capabilities/plugin-mcp-exposure.js';
 import { buildCatGitIdentityEnv } from '../../../../../config/cat-git-identity.js';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { parseOpenCodeModel, resolveEffectiveOpenCodeModel } from '../../../../../config/opencode-model.js';
@@ -168,6 +170,7 @@ import {
   writeOpenCodeInstructionsOnlyConfig,
   writeOpenCodeRuntimeConfig,
 } from '../providers/opencode-config-writer.js';
+import { prepareSessionCredentialFile, releaseInvocationCredentialFile } from '../providers/session-credential-file.js';
 import { appendTranscriptPathHints } from '../providers/transcript-path-hints.js';
 import {
   continuityDispositionFromProviderEvidence,
@@ -195,6 +198,7 @@ import {
 } from './provider-presentation-delivery.js';
 import { createRequestGenerationRecorder } from './request-generation-recorder.js';
 import { resolveManagedSessionPolicySnapshot } from './session-policy-snapshot.js';
+import { prepareSharedMcpLaunch } from './shared-mcp-launch.js';
 
 const log = createModuleLogger('invoke');
 const tracer = trace.getTracer('cat-cafe-api', '0.1.0');
@@ -1137,6 +1141,10 @@ async function syncAntigravityRuntimeMetadata(input: {
  * Shared dependencies for all cat invocations within one AgentRouter
  */
 export interface InvocationDeps {
+  readonly ordinaryTaskHandoffs?: import('../../../../ball-custody/OrdinaryTaskHandoffService.js').OrdinaryTaskHandoffService;
+  readonly resolveInvocationPluginMcpView?: () => Promise<
+    import('../../../../../config/capabilities/invocation-plugin-mcp-view.js').InvocationPluginMcpView | undefined
+  >;
   readonly resolveTrustedImagePath?: (hmrId: string) => Promise<string | undefined>;
   readonly messageStore?: import('../../stores/ports/MessageStore.js').IMessageStore;
   /** F293: fresh owner-scoped sparse routing projection resolved for every provider generation. */
@@ -1510,6 +1518,18 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
     ...(deps.workflowSopStore ? { workflowSopStore: deps.workflowSopStore } : {}),
   });
 
+  const mcpTransport = process.env.CAT_CAFE_MCP_TRANSPORT ?? 'shared';
+  const sharedMcpContext =
+    isCloudOnlyInvocation ||
+    frozenExecutionBinding.catConfig?.mcpSupport === false ||
+    effectiveToolExecutionPolicy?.mode === 'read_only'
+      ? undefined
+      : await prepareSharedMcpLaunch({
+          catId,
+          apiUrl,
+          workingDirectory: frozenExecutionBinding.workspace.workingDirectory,
+          transport: mcpTransport,
+        });
   const { invocationId, callbackToken } = await registry.create(
     userId,
     catId,
@@ -1522,7 +1542,9 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
     params.a2aTriggerMessageId ?? params.executionCausal?.triggerMessageId,
     params.ownerAuthProvenance,
     managedWorkBinding,
+    sharedMcpContext,
   );
+  let invocationMcpCredentialFile: string | undefined;
   let invocationHasAuthoritativeUsage = false;
   let invocationPolicyRecordId: string | undefined;
   let invocationPolicyPersistenceReady = false;
@@ -2063,6 +2085,8 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
   // Used when provider emits toolUseId; falls back to legacy recordToolUseSpan when not.
   const toolSpanTracker = new ToolSpanTracker(invocationSpan, catId as string);
   let activeServiceIterator: AsyncIterator<AgentMessage> | null = null;
+  const unclosedServiceIterators = new Set<AsyncIterator<AgentMessage>>();
+  let ordinaryTaskExecutionId: string | undefined;
   let presentationDelivery: { confirm(): Promise<AgentMessage[]>; release(reason: string): Promise<void> } | undefined;
   let currentPresentationAttempt: ProviderPresentationAttempt<InvocationPresentationReceipt> | undefined;
   let requestGenerationRecorder: ReturnType<typeof createRequestGenerationRecorder> | undefined;
@@ -2106,7 +2130,7 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
     try {
       if (!(await closeServiceIterator(iterator))) {
         log.warn({ catId, threadId, invocationId }, 'Timed out closing abandoned provider iterator');
-      }
+      } else unclosedServiceIterators.delete(iterator);
     } catch (err) {
       log.warn({ catId, threadId, invocationId, err }, 'Failed to close abandoned provider iterator');
     }
@@ -2131,6 +2155,15 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
     // F152: Track active invocations — must be inside try so add/sub symmetry
     // is guaranteed by the finally block, even on generator early abort.
     activeInvocations.add(1, { [AGENT_ID]: catId, [OPERATION_NAME]: 'invoke' });
+    if (sharedMcpContext) {
+      const prepared = prepareSessionCredentialFile('invocation-mcp-turn', callbackEnv);
+      if (!prepared) throw new Error('Shared MCP launch credentials unavailable');
+      invocationMcpCredentialFile = prepared.path;
+      callbackEnv.CAT_CAFE_CREDENTIAL_FILE = prepared.path;
+      callbackEnv.CAT_CAFE_MCP_TRANSPORT = mcpTransport;
+      callbackEnv.CAT_CAFE_DATA_DIR = sharedMcpContext.dataDir;
+      callbackEnv.ALLOWED_WORKSPACE_DIRS = sharedMcpContext.allowedWorkspaceDirs.join(',');
+    }
 
     // F152: Emit invocation start through OTel log pipeline
     emitOtelLog('INFO', 'invocation_started', { [AGENT_ID]: catId, [OPERATION_NAME]: 'invoke' }, invocationSpan);
@@ -2176,6 +2209,7 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
           catId,
           executionKind,
           startedAt: executionStartedAt,
+          providerLifecycleTracked: true,
           ...(params.liveCompanion ? { queueCompletionPolicy: 'explicit_source' as const } : {}),
           ...(Object.keys(executionCausal).length > 0 ? { causal: executionCausal } : {}),
           outputFence: params.outputFenced ? 'gated' : 'open',
@@ -2210,6 +2244,21 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
         throw new Error(`turn_execution_not_created:${created.outcome}:${invocationId}`);
       }
       ownsTurnExecution = true;
+    }
+
+    const taskSourceId = params.a2aTriggerMessageId ?? params.executionCausal?.triggerMessageId;
+    if (taskSourceId) {
+      if (deps.ordinaryTaskHandoffs) {
+        ordinaryTaskExecutionId = await deps.ordinaryTaskHandoffs.start(
+          taskSourceId,
+          { userId, catId, threadId, invocationId },
+          executionParentInvocationId,
+        );
+      } else {
+        const taskSource = await deps.messageStore?.getById(taskSourceId);
+        if (taskSource?.extra?.taskHandoff || taskSource?.extra?.taskHandoffInvalid)
+          throw new Error('task_execution_authority_unavailable');
+      }
     }
 
     const lifecycleAdmission = params.onLifecycleInvocationStarted
@@ -5550,12 +5599,27 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
           return { prompt: effectivePrompt, promptGenerationId: promptGenerationId(effectivePrompt) };
         },
       };
-      const serviceIter = (
-        usesProviderContinuityPreflight && service.invokeWithContinuityPreflight
-          ? service.invokeWithContinuityPreflight(continuityPreflight, options)
-          : service.invoke(effectivePrompt, options)
-      )[Symbol.asyncIterator]();
+      if (ordinaryTaskExecutionId && unclosedServiceIterators.size > 0)
+        throw new Error('task_provider_teardown_unconfirmed');
+      if (
+        deps.turnExecutionStore?.markProviderStarted &&
+        !(await deps.turnExecutionStore.markProviderStarted(invocationId, Date.now()))
+      )
+        throw new Error('provider_entry_fence_rejected');
+      const localPluginMcpView = await deps.resolveInvocationPluginMcpView?.();
+      const exposureProject = pluginMcpExposureProject(threadProjectPath, workingDirectory);
+      const serviceIter = bindInvocationPluginMcpView(
+        () =>
+          (usesProviderContinuityPreflight && service.invokeWithContinuityPreflight
+            ? service.invokeWithContinuityPreflight(continuityPreflight, options)
+            : service.invoke(effectivePrompt, options))[Symbol.asyncIterator](),
+        localPluginMcpView,
+        params.ownerAuthProvenance === 'strict' && exposureProject
+          ? { kind: 'member', projectRoot: exposureProject, memberCatId: catId }
+          : undefined,
+      );
       activeServiceIterator = serviceIter;
+      unclosedServiceIterators.add(serviceIter);
       for (;;) {
         let iterResult: IteratorResult<AgentMessage>;
         try {
@@ -5572,6 +5636,7 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
         }
         if (iterResult.done) {
           activeServiceIterator = null;
+          unclosedServiceIterators.delete(serviceIter);
           break;
         }
         let msg = await protectNativeProviderResult(iterResult.value, options);
@@ -6412,6 +6477,7 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
     // F117 KD-22: a member stopped by its output timeout failed; any other stop cancelled it.
     const timedOut = callerSignal?.aborted === true && callerSignal.reason === MEMBER_TIMEOUT_REASON;
     await closeActiveServiceIterator();
+    if (invocationMcpCredentialFile) releaseInvocationCredentialFile(invocationMcpCredentialFile);
     await terminateCurrentRequestGeneration(
       turnExecutionCompletedSuccessfully
         ? 'accepted'
@@ -6445,6 +6511,10 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
         };
       }
       try {
+        if (unclosedServiceIterators.size === 0) {
+          terminal = { ...terminal, providerTeardownAt: terminal.endedAt };
+          await deps.turnExecutionStore.recordProviderTeardown?.(invocationId, terminal.endedAt);
+        }
         const result = await deps.turnExecutionStore.transitionTerminal(invocationId, terminal);
         if (result.outcome === 'not_found' || result.record === null) {
           log.error({ invocationId, terminal }, 'Turn execution disappeared before terminal transition');
@@ -6481,6 +6551,18 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
         // A running record is deliberately left for startup reconciliation;
         // never manufacture lifecycle truth from logs or the auth registry.
         log.error({ invocationId, terminal, err }, 'Turn execution terminal transition failed');
+      }
+      if (ordinaryTaskExecutionId) {
+        try {
+          await deps.ordinaryTaskHandoffs?.finish(ordinaryTaskExecutionId, invocationId);
+        } catch (err) {
+          log.error({ invocationId, taskId: ordinaryTaskExecutionId, err }, 'Task execution release remains pending');
+        }
+      }
+      try {
+        await deps.ordinaryTaskHandoffs?.finishInvocation({ userId, catId, threadId, invocationId });
+      } catch (err) {
+        log.error({ invocationId, err }, 'Created Task execution release remains pending');
       }
     }
 

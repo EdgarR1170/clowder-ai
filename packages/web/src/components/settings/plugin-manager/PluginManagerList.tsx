@@ -7,8 +7,16 @@ import { SettingsText } from '../primitives/SettingsText';
 import { PluginRowActions } from './controls/PluginManagerActions';
 import { pluginManagerText } from './controls/plugin-manager.shell-copy';
 import { PluginSourceLabel } from './PluginSourceLabel';
+import { PluginStatusDot } from './PluginStatusDot';
 import { PluginVisual } from './PluginVisual';
-import { type PluginManagerPresentation, pluginAttentionReason, pluginHasUpdate } from './plugin-manager-attention';
+import type { PluginBatchResult } from './plugin-batch-model';
+import { batchResultText } from './plugin-batch-model';
+import {
+  type PluginManagerPresentation,
+  pluginAttentionReason,
+  pluginAttentionTone,
+  pluginHasUpdate,
+} from './plugin-manager-attention';
 import type { PluginManagerDesignFixture } from './plugin-manager-fixtures';
 
 export function PluginListSection({
@@ -17,20 +25,25 @@ export function PluginListSection({
   ariaLabel,
   rows,
   count,
+  action,
 }: {
   kind: 'installed' | 'attention' | 'recommended' | 'other' | 'available';
   title: string;
   ariaLabel: string;
   rows: readonly ReactNode[];
   count?: number;
+  action?: ReactNode;
 }) {
   if (rows.length === 0) return null;
   return (
     <section data-plugin-section={kind} className="space-y-2">
-      <SettingsText as="h3" variant="xs" tone="muted" className="px-1 font-semibold">
-        {title}
-        {count === undefined ? '' : ` · ${count}`}
-      </SettingsText>
+      <div className="flex min-h-7 items-center justify-between gap-2">
+        <SettingsText as="h3" variant="xs" tone="muted" className="px-1 font-semibold">
+          {title}
+          {count === undefined ? '' : ` · ${count}`}
+        </SettingsText>
+        {action}
+      </div>
       <ul
         aria-label={ariaLabel}
         className={
@@ -50,11 +63,14 @@ export function PluginListRow({
   selected,
   onSelect,
   onInstall,
+  onConfigure,
+  progress,
   onSetEnabled,
   onRepair,
   onBlockedToggle,
   onUninstall,
   busy,
+  locked = false,
   enableBlockedReason,
   locale,
   presentation = 'v1',
@@ -63,11 +79,14 @@ export function PluginListRow({
   selected: boolean;
   onSelect: () => void;
   onInstall?: () => void;
+  onConfigure?: () => void;
+  progress?: PluginBatchResult;
   onSetEnabled?: (enabled: boolean) => void;
   onRepair?: () => void;
   onBlockedToggle?: () => void;
   onUninstall?: () => void;
   busy: boolean;
+  locked?: boolean;
   enableBlockedReason?: string;
   locale: string;
   presentation?: PluginManagerPresentation;
@@ -77,7 +96,9 @@ export function PluginListRow({
   const description = resolvePluginDescription(plugin.description, locale);
   const reason = presentation === 'v2' ? pluginAttentionReason(plugin, locale) : undefined;
   const t = pluginManagerText(locale);
-  const summary = reason ?? (pluginHasUpdate(plugin) ? t.newVersion(plugin.availableVersion) : description);
+  const summary = progress
+    ? batchResultText(progress)
+    : (reason ?? (pluginHasUpdate(plugin) ? t.newVersion(plugin.availableVersion) : description));
   const modern = presentation === 'v2';
   return (
     <li
@@ -144,12 +165,16 @@ export function PluginListRow({
                 className="mt-0.5 flex min-w-0 items-center gap-1.5 text-compact text-cafe-secondary [@container(max-width:23rem)]:pr-8"
               >
                 {(reason || pluginHasUpdate(plugin)) && (
-                  <span
-                    aria-hidden="true"
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${reason ? 'bg-conn-amber-text' : 'bg-cafe-muted'}`}
-                  />
+                  <PluginStatusDot tone={reason ? pluginAttentionTone(plugin) : 'update'} />
                 )}
-                <span className="truncate" title={plugin.diagnostic && reason ? plugin.diagnostic : summary}>
+                <span
+                  className={
+                    reason
+                      ? 'min-w-0 truncate [@container(max-width:23rem)]:whitespace-normal [@container(max-width:23rem)]:overflow-visible [@container(max-width:23rem)]:text-clip'
+                      : 'truncate'
+                  }
+                  title={plugin.diagnostic && reason ? plugin.diagnostic : summary}
+                >
                   {summary}
                 </span>
               </span>
@@ -173,9 +198,11 @@ export function PluginListRow({
           </span>
         </button>
         <PluginRowActions
+          onConfigure={onConfigure}
           plugin={plugin}
           locale={locale}
           busy={busy}
+          locked={locked}
           onInstall={onInstall}
           onRepair={onRepair}
           onSetEnabled={onSetEnabled}

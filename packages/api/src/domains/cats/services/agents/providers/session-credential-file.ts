@@ -26,6 +26,11 @@ export interface PreparedCredentialEnv {
   path: string;
 }
 
+/** Managed shared and rollback transports keep the same one-turn credential owner. */
+export function isInvocationBoundMcpLaunch(env?: Record<string, string>): boolean {
+  return Boolean(env?.CAT_CAFE_CREDENTIAL_FILE && ['shared', 'stdio'].includes(env.CAT_CAFE_MCP_TRANSPORT));
+}
+
 interface CredentialPayload {
   threadId: string;
   catId: string;
@@ -103,6 +108,39 @@ export function prepareSessionCredentialFile(
   if (!prepared) return null;
   if (!writeSessionCredentialFile(callbackEnv, prepared.path)) return null;
   return prepared;
+}
+
+/** Only the owning invocation calls this after its carrier has finished closing. */
+export function releaseInvocationCredentialFile(path: string): void {
+  for (const owned of [path, `${path}.mcp.json`]) {
+    try {
+      unlinkSync(owned);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+/** Native launch configuration shares the existing invocation file owner. Never put headers in argv. */
+export function writeInvocationMcpConfigFile(config: unknown, callbackEnv?: Record<string, string>): string {
+  const path = callbackEnv?.CAT_CAFE_CREDENTIAL_FILE
+    ? `${callbackEnv.CAT_CAFE_CREDENTIAL_FILE}.mcp.json`
+    : join(credentialDir(), `standalone-mcp-${randomUUID()}.json`);
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, JSON.stringify(config), { flag: 'wx', mode: 0o600 });
+  try {
+    renameSync(temporary, path);
+  } catch (error) {
+    try {
+      unlinkSync(temporary);
+    } catch {
+      /* best effort after a failed native config write */
+    }
+    throw error;
+  }
+  void sweepStaleFiles(dirname(path));
+  return path;
 }
 
 export function bindSessionCredentialFile(namespace: string, sessionId: string | undefined, path: string): void {

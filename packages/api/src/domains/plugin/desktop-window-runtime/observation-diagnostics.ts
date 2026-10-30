@@ -1,6 +1,8 @@
+import type { ObservationWorkSummary, SealCaller } from '../diagnostics/observation-work.js';
 import { type SafeErrorProjection, safeErrorProjection } from '../diagnostics/safe-error-projection.js';
 import type { StaticFeatureRunDiagnostics, StaticFeatureRunStage } from '../host-broker/static-feature-authority.js';
 import { HostBrokerError } from '../host-broker/types.js';
+import { ObservationCosts } from './observation-costs.js';
 
 export interface ObservationError {
   readonly origin: 'host' | 'unverified';
@@ -11,7 +13,7 @@ export interface ObservationError {
   readonly sessionCloseReason?: string;
 }
 
-type Stage = StaticFeatureRunStage | 'poll' | 'lease-renew' | 'authority' | 'observation-publish';
+type Stage = StaticFeatureRunStage | 'poll' | 'poll-refresh' | 'lease-renew' | 'authority' | 'observation-publish';
 export interface ObservationStage {
   readonly stage: Stage;
   readonly elapsedMs: number;
@@ -91,7 +93,6 @@ function compact(value: SafeErrorProjection, depth = 0): ObservationError {
 function observationError(error: unknown): ObservationError {
   const projected = compact(
     safeErrorProjection(error, {
-      refusal: () => undefined,
       hostCode: (value) => (value instanceof HostBrokerError && BROKER_CODES.has(value.code) ? value.code : undefined),
     }),
   );
@@ -110,8 +111,18 @@ function observationError(error: unknown): ObservationError {
 
 const duration = (started: number) => Math.min(86_400_000, Math.max(0, Math.round(performance.now() - started)));
 
-/** One attempt, at most nine fixed stages; no sampling loop, global buffer or success logging. */
+/** One attempt, at most ten fixed stages; no sampling loop, global buffer or success logging. */
 export class ObservationDiagnostics implements StaticFeatureRunDiagnostics {
+  readonly costs: ObservationCosts;
+  constructor(caller: SealCaller = 'observer') {
+    this.costs = new ObservationCosts(caller);
+  }
+  get snapshotDiagnostics() {
+    return this.costs.snapshotDiagnostics;
+  }
+  get packageDiagnostics() {
+    return this.costs.packageDiagnostics;
+  }
   private readonly stages = new Map<Stage, { started: number; result?: ObservationStage }>();
   private error?: ObservationError;
 
@@ -143,9 +154,10 @@ export class ObservationDiagnostics implements StaticFeatureRunDiagnostics {
     }
   }
 
-  snapshot(error?: unknown): { stages: ObservationStage[]; error?: ObservationError } {
+  snapshot(error?: unknown): { stages: ObservationStage[]; error?: ObservationError; costs: ObservationWorkSummary } {
     const failure = error === undefined ? this.error : observationError(error);
     return {
+      costs: this.costs.snapshot(),
       stages: [...this.stages].map(([stage, entry]) =>
         structuredClone(entry.result ?? { stage, elapsedMs: duration(entry.started), status: 'pending' as const }),
       ),

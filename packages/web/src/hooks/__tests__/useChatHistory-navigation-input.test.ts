@@ -188,6 +188,54 @@ describe('useChatHistory navigation input owner', () => {
     return { el, top, second };
   }
 
+  it('keeps an explicit cold-source arrival pending when the first history snapshot commits', async () => {
+    const threadId = 'cold-source-before-first-layout';
+    const message = makeMsg('cold-target', 1);
+    useChatStore.setState({
+      currentThreadId: threadId,
+      messages: [],
+      hasMore: true,
+      threadStates: { [threadId]: { ...makeThreadState([]), hasMore: true } },
+    });
+    let release!: (value: Response) => void;
+    const page = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    apiFetchMock.mockImplementation(async (url) =>
+      String(url).startsWith('/api/messages?')
+        ? page
+        : ({
+            ok: true,
+            json: async () => ({ tasks: [], queue: [], activeInvocations: [], hasMore: false }),
+          } as Response),
+    );
+    await act(async () => root.render(React.createElement(HookHost, { threadId })));
+    const el = capturedHook!.scrollContainerRef.current!;
+    const top = defineMutableNumberProp(el, 'scrollTop', 0);
+    defineMutableNumberProp(el, 'scrollHeight', 1400);
+    defineMutableNumberProp(el, 'clientHeight', 600);
+    el.getBoundingClientRect = () => ({ top: 100, bottom: 700, height: 600 }) as DOMRect;
+    const rect = () => ({ top: 500 - top.get(), bottom: 620 - top.get(), height: 120 });
+    const boundary = appendMessageBoundary(el, message.id, rect);
+    const target = boundary.firstElementChild as HTMLElement;
+    target.getBoundingClientRect = () => rect() as DOMRect;
+    target.scrollIntoView = () => top.set(240);
+    capturedHook!.messagesEndRef.current!.scrollIntoView = vi.fn();
+    const settled = vi.fn();
+    act(() => {
+      void capturedHook!.navigateToMessage(message.id).then(settled);
+    });
+    await act(async () =>
+      release({ ok: true, json: async () => ({ messages: [message], hasMore: false }) } as Response),
+    );
+    await act(async () => {
+      for (let frame = 0; frame < 8; frame++) flushAnimationFrames();
+    });
+    expect(settled).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'settled', threadId, messageId: message.id }),
+    );
+  });
+
   it('captures the actual surface reading point and restores it only after owner settlement', async () => {
     const { top } = await openThread('search-reading-return');
     const gesture = beginGesture();
@@ -230,6 +278,48 @@ describe('useChatHistory navigation input owner', () => {
     });
     expect(capturedHook!.releaseReadingRef(captured.ref)).toBe(true);
     expect(readChatReadingRef(captured.ref)).toBeUndefined();
+  });
+
+  it('confirms the saved paragraph after a long origin reflows and its real widget acknowledges input', async () => {
+    const threadId = 'search-return-reflowed-paragraph';
+    const { el, top } = await openThread(threadId);
+    const boundary = el.querySelector<HTMLElement>('[data-message-viewport-id="first"]')!;
+    const paragraph = document.createElement('p');
+    paragraph.textContent = 'The same paragraph the reader left.';
+    let paragraphTop = 240;
+    paragraph.getBoundingClientRect = () =>
+      ({ top: 100 + paragraphTop - top.get(), bottom: 140 + paragraphTop - top.get() }) as DOMRect;
+    boundary.querySelector('[data-message-id]')!.appendChild(paragraph);
+    act(() => {
+      const gesture = beginGesture();
+      gesture.scrollTo(200);
+      gesture.end();
+    });
+    const origin = capturedHook!.captureReadingRef()!;
+    expect(readChatReadingRef(origin.ref)?.position).toMatchObject({
+      messageAnchor: { messageId: 'first', viewportOffsetPx: -200, blockViewportOffsetPx: 40 },
+    });
+    const fixture = await mountReceiptWidget(el);
+    try {
+      paragraphTop += 80;
+      act(() => {
+        const gesture = beginGesture();
+        gesture.scrollTo(500);
+        gesture.end();
+      });
+      let receipt!: ReturnType<ReturnType<typeof useChatHistory>['restoreReadingRef']>;
+      act(() => {
+        receipt = capturedHook!.restoreReadingRef(origin.ref);
+      });
+      await act(async () => flushAnimationFrames());
+      expect(top.get()).toBe(280);
+      expect(paragraph.getBoundingClientRect().top - el.getBoundingClientRect().top).toBe(40);
+      await act(async () => fixture.acknowledge(fixture.requests()[0]!));
+      expect(await receipt).toMatchObject({ status: 'settled', exact: true });
+      expect(readChatReadingRef(origin.ref)).toBeDefined();
+    } finally {
+      fixture.dispose();
+    }
   });
 
   it.each([2, 100])('keeps an older origin pending while its page takes %i frames', async (frames) => {
@@ -531,6 +621,89 @@ describe('useChatHistory navigation input owner', () => {
     expect(readChatReadingRef(origin.ref)?.threadId).toBe('source-return-cancellation');
   });
 
+  it.each([
+    ['return', 'abort'],
+    ['search', 'abort'],
+    ['return', 'wheel'],
+    ['search', 'wheel'],
+  ] as const)('settles a cancelled %s on %s while its history refresh is still pending', async (kind, cancellation) => {
+    const threadId = `cancel-refresh-${kind}-${cancellation}`;
+    const { el, top } = await openThread(threadId);
+    const origin = capturedHook!.captureReadingRef()!;
+    let releaseHistory!: (response: Response) => void;
+    apiFetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          releaseHistory = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const settled = vi.fn();
+    await act(async () => {
+      const receipt =
+        kind === 'return'
+          ? capturedHook!.restoreReadingRef(origin.ref, controller.signal, { refresh: true })
+          : capturedHook!.navigateToMessage('first', controller.signal, { refresh: true });
+      void receipt.then(settled);
+    });
+    expect(releaseHistory).toBeTypeOf('function');
+    await act(async () => {
+      if (cancellation === 'abort') controller.abort();
+      else el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
+    });
+    expect(settled).toHaveBeenCalledWith({ status: 'interrupted' });
+    await act(async () => {
+      el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
+      top.set(200);
+      capturedHook!.handleScroll();
+      releaseHistory({
+        ok: true,
+        json: async () => ({ messages: [makeMsg('first', 1), makeMsg('second', 2)], hasMore: false }),
+      } as Response);
+      for (let frame = 0; frame < 8; frame++) flushAnimationFrames();
+    });
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(top.get()).toBe(200);
+    expect(readChatReadingRef(origin.ref)?.threadId).toBe(threadId);
+  });
+
+  it('lets a newer source reuse pending history without an old cancellation retiring it', async () => {
+    const { top, second } = await openThread('replacement-during-refresh');
+    second.querySelector<HTMLElement>('[data-message-id]')!.scrollIntoView = () => top.set(500);
+    const origin = capturedHook!.captureReadingRef()!;
+    let releaseHistory!: (response: Response) => void;
+    apiFetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          releaseHistory = resolve;
+        }),
+    );
+    const oldController = new AbortController();
+    const oldResult = vi.fn();
+    const newResult = vi.fn();
+    await act(async () => {
+      void capturedHook!.restoreReadingRef(origin.ref, oldController.signal, { refresh: true }).then(oldResult);
+    });
+    await act(async () => {
+      void capturedHook!.navigateToMessage('second', undefined, { refresh: true }).then(newResult);
+      oldController.abort();
+    });
+    expect(oldResult).toHaveBeenCalledWith({ status: 'interrupted' });
+    expect(newResult).not.toHaveBeenCalled();
+    await act(async () => {
+      releaseHistory({
+        ok: true,
+        json: async () => ({ messages: [makeMsg('first', 1), makeMsg('second', 2)], hasMore: false }),
+      } as Response);
+    });
+    await act(async () => {
+      for (let frame = 0; frame < 8; frame++) flushAnimationFrames();
+    });
+    expect(newResult).toHaveBeenCalledWith(expect.objectContaining({ status: 'settled', messageId: 'second' }));
+    expect(oldResult).toHaveBeenCalledTimes(1);
+    expect(top.get()).toBe(500);
+  });
+
   it('refreshes canonical history before a search target can settle, instead of rendering an edited cached body', async () => {
     const { top, second } = await openThread('source-fresh-history');
     apiFetchMock.mockClear();
@@ -572,6 +745,37 @@ describe('useChatHistory navigation input owner', () => {
     });
     expect(result).toHaveBeenCalledWith({ status: 'unavailable' });
     expect(top.get()).toBe(600);
+  });
+
+  it('loads a reply newer than the cached window through canonical refresh before reporting arrival', async () => {
+    const threadId = 'cloud-reply-newer-window';
+    const { el, top } = await openThread(threadId);
+    const reply = makeMsg('reply122', 3);
+    apiFetchMock.mockClear();
+    apiFetchMock.mockResolvedValue({ ok: true, json: async () => ({ messages: [reply], hasMore: false }) } as Response);
+    const boundary = appendMessageBoundary(el, reply.id, () => ({ top: 100 - top.get(), bottom: 500 - top.get() }));
+    boundary.querySelector<HTMLElement>('[data-message-id]')!.scrollIntoView = () => top.set(100);
+    let receipt!: Promise<import('../useChatHistory').ChatMessageNavigationReceipt>;
+    await act(async () => {
+      receipt = capturedHook!.navigateToMessage(reply.id, undefined, { refresh: true });
+      for (let n = 0; n < 10; n++) await Promise.resolve();
+    });
+    expect(
+      apiFetchMock.mock.calls.some(
+        ([url]) => String(url).startsWith('/api/messages?') && !String(url).includes('before='),
+      ),
+    ).toBe(true);
+    await act(async () => {
+      for (let n = 0; n < 8; n++) flushAnimationFrames();
+      await receipt;
+    });
+    expect(await receipt).toMatchObject({ status: 'settled', threadId, messageId: reply.id });
+    expect(
+      useChatStore
+        .getState()
+        .getThreadState(threadId)
+        .messages.some((message) => message.id === reply.id),
+    ).toBe(true);
   });
 
   it('retires an explicit restore receipt on new input, and rejects another thread snapshot', async () => {

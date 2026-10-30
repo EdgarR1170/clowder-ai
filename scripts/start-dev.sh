@@ -1690,24 +1690,24 @@ claim_preview_cleanup_result() {
 publish_preview_cleanup_result() {
     [ -n "$CLI_PREVIEW_CLEANUP_RESULT" ] || return 0
     local temporary="${CLI_PREVIEW_CLEANUP_RESULT}.$$"
-    (umask 077; printf '{"pid":%s,"processGroupId":%s,"exitCode":%s}\n' \
-        "$$" "$PREVIEW_CLEANUP_PROCESS_GROUP" "$1" > "$temporary") || return 1
+    (umask 077; printf '{"version":2,"pid":%s,"processGroupId":%s,"exitCode":%s,"cleanupExitCode":%s,"commandExitCode":%s}\n' \
+        "$$" "$PREVIEW_CLEANUP_PROCESS_GROUP" "$1" "$1" "$2" > "$temporary") || return 1
     mv -f "$temporary" "$CLI_PREVIEW_CLEANUP_RESULT"
 }
 
 finish_launcher() {
-    local exit_status="$1" cleanup_result="$2"
+    local exit_status="$1" command_exit="$1" cleanup_result=0
     trap - EXIT
     trap '' INT TERM
     if ! cleanup; then exit_status=1; cleanup_result=1; fi
-    publish_preview_cleanup_result "$cleanup_result" || exit_status=1
+    publish_preview_cleanup_result "$cleanup_result" "$command_exit" || exit_status=1
     exit "$exit_status"
 }
 
 claim_preview_cleanup_result || exit 1
-trap 'finish_launcher "$?" "$?"' EXIT
-trap 'finish_launcher 130 0' INT
-trap 'finish_launcher 143 0' TERM
+trap 'finish_launcher "$?"' EXIT
+trap 'finish_launcher 130' INT
+trap 'finish_launcher 143' TERM
 
 guard_main_branch_start() {
     if [ "${CAT_CAFE_ALLOW_MAIN_DEV:-0}" = "1" ]; then
@@ -2018,11 +2018,12 @@ fi
 
 if [[ "${1:-}" == "--status" ]] || [[ "${1:-}" == "status" ]]; then
     maybe_migrate_legacy_daemon_state
-    daemon_state status
+    status_rc=0
+    daemon_state status || status_rc=$?
     print_f247_cloud_status_summary
     echo "  停止: $(daemon_stop_hint)"
     echo "  查看日志: tail -f $DAEMON_LOG_FILE"
-    exit 0
+    exit "$status_rc"
 fi
 
 if [ "$DAEMON_MODE" = true ]; then
