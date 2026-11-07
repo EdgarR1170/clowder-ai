@@ -85,7 +85,7 @@ export function useGitPanel() {
     setStatusLoading(true);
     try {
       const res = await apiFetch(`/api/workspace/git-status?worktreeId=${encodeURIComponent(target)}`);
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await readGitErrorCode(res));
       const json = await res.json();
       if (ownsRead(request, statusEpoch, target)) {
         setStatusSnap({ worktreeId: target, value: json });

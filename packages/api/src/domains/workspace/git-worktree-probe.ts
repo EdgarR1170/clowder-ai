@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstat, readFile, stat } from 'node:fs/promises';
+import { lstat, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -88,8 +88,8 @@ async function hasBareGitRepositoryMarkers(cwd: string): Promise<boolean> {
 }
 
 async function hasBareConfig(root: string): Promise<boolean> {
-  const config = await readFile(join(root, 'config'), 'utf8').catch(() => '');
-  return /^\s*bare\s*=\s*true\s*$/im.test(config);
+  const result = await execGit(root, ['config', '--file', join(root, 'config'), '--type=bool', '--get', 'core.bare']);
+  return result.ok && result.stdout.trim() === 'true';
 }
 
 /**

@@ -126,6 +126,33 @@ describe('workspace git probe failures', () => {
     assert.equal(JSON.parse(response.payload).code, 'git_unavailable');
   });
 
+  test('view section bare=true is not core.bare evidence', async () => {
+    const plain = join(root, 'plain-view-bare');
+    mkdirSync(plain);
+    writeFileSync(join(plain, 'config'), '[view]\n\tbare = true\n');
+    registerWorktrees([{ id: 'probe-view-bare', root: plain, branch: 'main', head: 'abc123' }]);
+
+    const status = await app.inject({ method: 'GET', url: '/api/workspace/git-status?worktreeId=probe-view-bare' });
+    assert.equal(status.statusCode, 200);
+    assert.equal(JSON.parse(status.payload).isGitRepository, false);
+  });
+
+  test('Git-valid core.bare=yes on a damaged bare repo stays an error', async () => {
+    const repo = join(root, 'repo-for-bare-yes');
+    mkdirSync(repo);
+    initRepo(repo);
+    const bare = join(root, 'bare-yes.git');
+    execFileSync('git', ['clone', '--bare', repo, bare], { stdio: 'ignore' });
+    execFileSync('git', ['config', '--file', join(bare, 'config'), 'core.bare', 'yes']);
+    rmSync(join(bare, 'HEAD'));
+    rmSync(join(bare, 'objects'), { recursive: true, force: true });
+    registerWorktrees([{ id: 'probe-bare-yes', root: bare, branch: 'main', head: 'abc123' }]);
+
+    const status = await app.inject({ method: 'GET', url: '/api/workspace/git-status?worktreeId=probe-bare-yes' });
+    assert.equal(status.statusCode, 503);
+    assert.equal(JSON.parse(status.payload).code, 'git_unavailable');
+  });
+
   test('ordinary config with empty objects/refs stays non-git', async () => {
     const plain = join(root, 'plain-config');
     mkdirSync(join(plain, 'objects'), { recursive: true });
