@@ -7,7 +7,7 @@ import { bundleDesktopApi } from './bundle-desktop-api.mjs';
 import { bundleRuntimePackages } from './bundle-runtime-packages.mjs';
 import { exportFrozenRuntime } from './frozen-runtime-export.mjs';
 import { readFrozenRuntimeInputs } from './frozen-runtime-inputs.mjs';
-import { pruneFrozenRuntimeRedundancy } from './frozen-runtime-prune.mjs';
+import { pruneFrozenPackageTree, pruneFrozenRuntimeRedundancy } from './frozen-runtime-prune.mjs';
 import { profileDesktopStartup } from './profile-desktop-startup.mjs';
 import { rebuildFrozenDependencies } from './rebuild-frozen-dependencies.mjs';
 
@@ -60,19 +60,29 @@ const receipt = exportFrozenRuntime(workspace, out, packages, path.join(source, 
       : undefined,
 });
 // Packaging redundancy removal happens here, before startup profiling, so the
-// installer archive and the portable zip share one file set. Only the shared
-// Windows export layout has `dependencies/`; other layouts must not enter it.
-if (os.platform() === 'win32' && fs.existsSync(path.join(out, 'dependencies'))) {
+// installer archive, the portable zip and startup profiling share one file set.
+// Only the shared Windows export layout has `dependencies/`; other layouts stay untouched.
+// First-party API linked sourcemaps are intentionally preserved; CAT_CAFE_PRUNE_MAPS
+// only prunes third-party sourcemaps under `dependencies/`.
+const isSharedWindowsLayout = os.platform() === 'win32' && fs.existsSync(path.join(out, 'dependencies'));
+const pruneDevArtifacts = process.env.CAT_CAFE_PRUNE_DEV_ARTIFACTS === '1';
+if (isSharedWindowsLayout) {
   receipt.frozenPrune = pruneFrozenRuntimeRedundancy(path.join(out, 'dependencies'), {
     swc: process.env.CAT_CAFE_PRUNE_SWC === '1',
     platform: process.env.CAT_CAFE_PRUNE_PLATFORM === '1',
     maps: process.env.CAT_CAFE_PRUNE_MAPS === '1',
+    devArtifacts: pruneDevArtifacts,
   });
 }
 if (os.platform() === 'win32' && packages.includes('api')) {
   receipt.runtimePackages = await bundleRuntimePackages(out);
   receipt.desktopApi = await bundleDesktopApi(path.join(out, 'api'));
   if (!receipt.desktopApi.agentHooks) throw new Error('Frozen API requires its dedicated installer hooks bundle');
+  if (isSharedWindowsLayout && pruneDevArtifacts) {
+    receipt.frozenPackagePrune = pruneFrozenPackageTree(out, {
+      devArtifacts: pruneDevArtifacts,
+    });
+  }
   receipt.startupReadAhead = await profileDesktopStartup(source, out);
 }
 fs.writeFileSync(path.join(out, 'frozen-install.json'), JSON.stringify({ ...receipt, workspace }, null, 2));

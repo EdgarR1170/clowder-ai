@@ -198,6 +198,7 @@ if (-not $SkipBundleDeps) {
         CAT_CAFE_PRUNE_SWC = '1'
         CAT_CAFE_PRUNE_PLATFORM = '1'
         CAT_CAFE_PRUNE_MAPS = '1'
+        CAT_CAFE_PRUNE_DEV_ARTIFACTS = '1'
     } -Action {
         node (Join-Path $ProjectRoot "desktop/scripts/frozen-runtime-deploy.mjs") $ProjectRoot $nextDeploy
         if ($LASTEXITCODE -ne 0) { throw "Frozen runtime export failed" }

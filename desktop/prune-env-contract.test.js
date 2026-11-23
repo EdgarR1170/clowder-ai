@@ -70,7 +70,10 @@ test(
     });
 
     const source = fs.readFileSync(buildScript, 'utf8');
-    assert.match(source, /Invoke-WithProcessEnv -Defaults @\{[\s\S]*CAT_CAFE_PRUNE_SWC = '1'/);
+    assert.match(
+      source,
+      /Invoke-WithProcessEnv -Defaults @\{[\s\S]*CAT_CAFE_PRUNE_SWC = '1'[\s\S]*CAT_CAFE_PRUNE_DEV_ARTIFACTS = '1'/,
+    );
     assert.doesNotMatch(source, /\$env:CAT_CAFE_PRUNE_SWC = '1'/);
     assert.match(source, /Invoke-WithProcessEnv -Defaults @\{ RUNTIME_ARCHIVE_GZIP_LEVEL = '9' \}/);
   },
