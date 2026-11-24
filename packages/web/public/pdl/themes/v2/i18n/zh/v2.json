@@ -5291,7 +5291,14 @@
     "jump": "跳到原文"
   },
   "nativeSetup": {
-    "title": "探测可用 Client",
+    "title": "一键检测并添加猫猫",
+    "quickEntry": "一键检测并添加猫猫",
+    "manualEntry": "手动添加成员",
+    "probing": "正在检测本机已安装工具与 DeepSeek 鲸鲸…",
+    "dshTool": "DeepSeek 鲸鲸 (DSH)",
+    "toolLabel": "快捷工具接入",
+    "toolNone": "手动按客户端配置",
+    "toolHelp": "直接选用本机已安装的 Codex、Claude Code、AGY、Kimi 或 DeepSeek 鲸鲸（DSH），自动带入启动配置。",
     "detect": "重新探测",
     "create": "创建所选成员",
     "created": "已创建",

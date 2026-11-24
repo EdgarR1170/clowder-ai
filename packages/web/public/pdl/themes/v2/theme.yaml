@@ -7424,6 +7424,20 @@ pdl:
       - $frag: v2.bind.v2Check.35
     v2.bind.fields.28:
       - kind: field
+        label: t:nativeSetup.toolLabel
+        id: f-runtime
+        help: t:nativeSetup.toolHelp
+        control:
+          type: component
+          use: v2Select
+          props:
+            id: f-runtime
+            value: $.form.runtimeId
+            none: t:nativeSetup.toolNone
+            change: memberRuntime
+            options: $.form.runtimes
+        when: $.form.runtimes
+      - kind: field
         label: t:memberForm.fields.client
         id: f-client
         control:
@@ -11938,6 +11952,15 @@ pdl:
                   act: open
                   args:
                     node: guide.window
+                    as: float
+                  role: demo
+              - type: component
+                use: v2WatchDemoButton
+                props:
+                  label: t:nativeSetup.quickEntry
+                  act: open
+                  args:
+                    node: members.setup.window
                     as: float
                   role: demo
               - type: component
@@ -22243,6 +22266,15 @@ pdl:
                     - type: component
                       use: v2SettingsButton
                       props:
+                        label: t:nativeSetup.quickEntry
+                        act: open
+                        args:
+                          node: members.setup.window
+                          as: float
+                        primary: true
+                    - type: component
+                      use: v2SettingsButton
+                      props:
                         label: t:v2b.w36
                         act: open
                         args:
@@ -23180,6 +23212,13 @@ pdl:
                         prefix: t:memberNew.fromHome
                         label: t:memberNew.fromHome
                         change: pickTpl
+                  right:
+                    - type: component
+                      use: v2Action
+                      props:
+                        icon: search
+                        label: t:nativeSetup.quickEntry
+                        act: nativeOpen
                 load: $.tplLoad
                 error: t:memberNew.templatesError
               - $frag: v2.bind.v2Each.7
@@ -30500,6 +30539,11 @@ pdl:
               - type: component
                 use: v2Action
                 props:
+                  label: t:nativeSetup.manualEntry
+                  act: nativeManual
+              - type: component
+                use: v2Action
+                props:
                   icon: refresh
                   label: t:nativeSetup.detect
                   act: nativeDetect
@@ -30522,6 +30566,11 @@ pdl:
                 props:
                   id: native-partners
                   from: $.items
+                  empty:
+                    of: $.busy
+                    map:
+                      "true": t:nativeSetup.probing
+                      _: t:list.empty
                   row:
                     layout: two
                     key: "@id"
@@ -30538,6 +30587,11 @@ pdl:
                             role: row
                         when: "@selectable"
                     title: "@name"
+                    inline:
+                      - lit: " · "
+                        when: "@nickname"
+                      - text: "@nickname"
+                        when: "@nickname"
                     sub: "@runtime.label"
                     cols:
                       - v:

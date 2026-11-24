@@ -304,7 +304,7 @@ function bindMembers() {
   };
 
   function selectedRuntime(form) {
-    return meta.runtimes.find(function (row) {
+    const exact = meta.runtimes.find(function (row) {
       return (
         row.form.clientId === form.clientId &&
         row.form.carrier === form.carrier &&
@@ -317,6 +317,18 @@ function bindMembers() {
               (row.form.acpTransport || 'stdio') === (form.acpTransport || 'stdio')))
       );
     });
+    if (exact) return exact;
+    if (
+      form.carrier === 'acp' &&
+      !form.acpAgentProvider &&
+      form.acpCommand === 'dsh' &&
+      form.acpStartupArgs === '--profile acp'
+    ) {
+      return meta.runtimes.find(function (row) {
+        return row.id === 'dsh';
+      });
+    }
+    return undefined;
   }
   const catalogs = new Map();
   // The model a catalog is read for: the one the form had, then each committed model (change: blur, Enter, a picked
@@ -690,6 +702,27 @@ function bindMembers() {
       accountRef: f.accountRef,
       clientName: client && client.label,
       nativeLogin: runtime && runtime.readiness,
+      runtimeId: runtime ? runtime.id : '',
+      runtimes: meta.runtimes.map(function (r) {
+        const status =
+          r.id.indexOf('plugin:') === 0
+            ? r.installed
+              ? tc('nativeSetup.ready')
+              : tc('common.status.notInstalled')
+            : /^(manual|draft):/.test(r.id)
+              ? ''
+              : r.installed
+                ? r.id === 'dsh'
+                  ? tc('nativeSetup.dshAuto')
+                  : tc('nativeSetup.ready')
+                : tc('common.status.notInstalled');
+        const title = r.id === 'dsh' ? tc('nativeSetup.dshTool') : r.label;
+        return {
+          v: r.id,
+          label: status ? title + ' · ' + status : title,
+          why: r.discoveryStatus === 'acp_profile_invalid' ? tc('nativeSetup.conflict') : '',
+        };
+      }),
       d: d,
       clients: meta.clients.map(function (c) {
         return { value: c.id, name: c.label, type: c.plugin ? 'plugin' : 'name', pluginName: c.plugin, why: '' };
@@ -860,12 +893,20 @@ function bindMembers() {
     draft().shared[e.target.dataset.k] = e.target.value;
     render(true);
   };
-  CHANGES.memberRuntime = function (e) {
+  CHANGES.memberRuntime = async function (e) {
     const state = draft(),
       runtime = meta.runtimes.find(function (row) {
         return row.id === e.target.value;
       });
     if (!runtime) return;
+    if (!state.id && runtime.id === 'dsh' && !state.form.name.trim()) {
+      try {
+        state.form = await act('memberTemplate', { id: 'dsh', value: JSON.stringify(state.form) });
+        tpl = 'dsh';
+      } catch (_err) {
+        /* keep current identity fields if template lookup fails */
+      }
+    }
     Object.assign(state.form, pdlClone(runtime.form));
     commitModel(state.form);
     render(true);
@@ -1181,6 +1222,12 @@ function bindMembers() {
     const state = draft();
     try {
       state.form = await act('memberTemplate', { id: data.id, value: JSON.stringify(state.form) });
+      if (data.id === 'dsh' && meta && Array.isArray(meta.runtimes)) {
+        const dshRuntime = meta.runtimes.find(function (row) {
+          return row.id === 'dsh' && row.installed && row.form;
+        });
+        if (dshRuntime) Object.assign(state.form, pdlClone(dshRuntime.form));
+      }
       tpl = data.id;
       render(true);
     } catch (error) {
@@ -1389,6 +1436,18 @@ function bindMembers() {
     d = S.dialog;
   };
   S.nativeSetup = null;
+  A.nativeOpen = function () {
+    if (S.route === 'memberNew') {
+      editor = null;
+      go('members');
+    }
+    S.popOn.nativeSetup = true;
+    render(true);
+  };
+  A.nativeManual = function () {
+    S.popOn.nativeSetup = false;
+    go('memberNew');
+  };
   beforeRender(function () {
     if (S.popOn.nativeSetup && !S.nativeSetup) A.nativeDetect({ refresh: false });
     if (!S.popOn.nativeSetup) S.nativeSetup = null;
@@ -1423,10 +1482,12 @@ function bindMembers() {
     const g = S.nativeSetup;
     if (!g) return null;
     return {
+      busy: g.busy,
       items: g.partners.map(function (p) {
         return {
           id: p.id,
           name: p.form.displayName,
+          nickname: p.form.nickname && p.form.nickname !== p.form.displayName ? p.form.nickname : '',
           runtime: p.runtime,
           selected: p.selected,
           existingId: p.existingId,

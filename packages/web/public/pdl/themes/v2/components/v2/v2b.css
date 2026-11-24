@@ -32,7 +32,7 @@
 :is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog > header { flex:none; padding:0; border:0; }
 /* Allow full-viewport fixed modals (Member Editor, Marketplace, Update Required) inside [data-grid] to escape inline-size containment in split mode */
 [data-grid]:has([data-bootcamp-host="cat-editor-modal"], .fixed.inset-0) { container-type:normal; }
-[data-bootcamp-host="cat-editor-modal"] { position:fixed; inset:0; z-index:120; display:flex; align-items:center; justify-content:center; padding:16px; }
+[data-bootcamp-host="cat-editor-modal"] { position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; padding:16px; }
 .member-editor-modal { width:min(880px, calc(100vw - 32px)) !important; max-width:880px !important; max-height:min(90dvh, 920px) !important; }
 .member-editor-modal [data-form="member"] { flex:1 1 0%; min-width:0; }
 .member-editor-modal #savebar:not([hidden]) { position:sticky; bottom:0; z-index:20; margin-top:16px; padding:12px 16px; border-radius:14px; border:1px solid var(--cafe-border-subtle); background:var(--console-card-bg, var(--cafe-surface)); box-shadow:0 -6px 20px rgb(0 0 0 / .08); }

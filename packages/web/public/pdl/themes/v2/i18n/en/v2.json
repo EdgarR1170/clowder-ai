@@ -5291,7 +5291,14 @@
     "jump": "Jump to original"
   },
   "nativeSetup": {
-    "title": "Detect available clients",
+    "title": "One-click partner setup",
+    "quickEntry": "One-click partner setup",
+    "manualEntry": "Add manually",
+    "probing": "Detecting installed local tools and DeepSeek DSH…",
+    "dshTool": "DeepSeek Whale (DSH)",
+    "toolLabel": "Quick tool binding",
+    "toolNone": "Configure manually by client",
+    "toolHelp": "Select an installed local tool such as Codex, Claude Code, AGY, Kimi, or DeepSeek DSH to prefill launch settings.",
     "detect": "Detect again",
     "create": "Create selected members",
     "created": "Created",
