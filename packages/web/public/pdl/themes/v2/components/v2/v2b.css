@@ -9,11 +9,11 @@
 .v2-shell details.v2-collection > summary { list-style:none; }
 .v2-shell details.v2-collection > summary::-webkit-details-marker { display:none; }
 .v2-shell details.v2-collection:not([open]) > .v2-collection-overview { display:block; }
-.v2-shell .v2-confirm-dialog { display:block; position:relative; width:100%; max-width:384px; margin:0 16px; padding:24px; border:0; border-radius:12px; color:var(--cafe-text); background:var(--cafe-surface); box-shadow:0 20px 25px -5px rgb(0 0 0 / .1),0 8px 10px -6px rgb(0 0 0 / .1); gap:0; }
-.v2-shell .v2-confirm-dialog.v2-dialog-wide { max-width:768px; }
-.v2-shell .v2-confirm-dialog > .v2-dialog-body { display:block; padding:0; margin:0; max-height:70vh; overflow-y:auto; }
-.v2-shell .v2-confirm-dialog > .acts { display:flex; justify-content:flex-end; gap:8px; padding:0; margin-top:16px; border:0; }
-.v2-shell .v2-confirm-dialog input, .v2-shell .v2-confirm-dialog select, .v2-shell .v2-confirm-dialog textarea { box-sizing:border-box; }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog { display:flex; flex-direction:column; position:relative; width:min(560px, calc(100vw - 32px)); max-width:min(560px, calc(100vw - 32px)); margin:0 auto; padding:24px; border:0; border-radius:16px; color:var(--cafe-text); background:var(--cafe-surface); box-shadow:0 20px 25px -5px rgb(0 0 0 / .1),0 8px 10px -6px rgb(0 0 0 / .1); gap:0; }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog.v2-dialog-wide { width:min(860px, calc(100vw - 32px)); max-width:min(860px, calc(100vw - 32px)); }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog > .v2-dialog-body { display:block; flex:1 1 auto; min-height:0; padding:0; margin:0; max-height:74vh; overflow-y:auto; }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog > .acts { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; padding:0; margin-top:16px; border:0; }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog input, :is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog select, :is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog textarea { box-sizing:border-box; }
 .v2-help { display:inline-flex; width:24px; height:24px; align-items:center; justify-content:center; border:1px solid var(--shell-hairline); border-radius:50%; font-size:12px; font-weight:400; color:var(--shell-muted); }
 .v2-shell .v2-toast { display:block; background:var(--cafe-surface); padding:10px 12px; border:1px solid var(--cafe-border-subtle); border-left-width:4px; border-left-color:var(--semantic-warning); border-radius:8px; }
 .v2-shell .v2-mission summary, .v2-shell .v2-memory-catalog summary { list-style:none; }
@@ -26,10 +26,17 @@
 .v2-shell .v2-collection-card > .v2-collection-actions { order:2; }
 .v2-shell .v2-collection-card .v2-collection-documents { order:3; }
 .v2-shell details.v2-collection[open] .v2-collection-arrow { transform:rotate(90deg); }
-.v2-shell .v2-confirm-dialog.v2-dialog-viewport { height:calc(100dvh - 48px); max-width:calc(100vw - 48px); }
-.v2-shell .v2-confirm-dialog.v2-dialog-fill, .v2-shell .v2-confirm-dialog.v2-dialog-full { width:calc(100vw - 48px); max-width:calc(100vw - 48px); }
-.v2-shell .v2-confirm-dialog.v2-dialog-viewport > .v2-dialog-body { height:calc(100% - 48px); max-height:none; }
-.v2-shell .v2-confirm-dialog > header { flex:none; padding:0; border:0; }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog.v2-dialog-viewport { width:min(1120px, calc(100vw - 48px)); height:calc(100dvh - 48px); max-width:calc(100vw - 48px); }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog.v2-dialog-fill, :is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog.v2-dialog-full { width:min(1160px, calc(100vw - 48px)); max-width:calc(100vw - 48px); max-height:calc(100dvh - 48px); justify-self:center; }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog.v2-dialog-viewport > .v2-dialog-body, :is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog.v2-dialog-fill > .v2-dialog-body { flex:1 1 auto; min-height:0; max-height:calc(100dvh - 140px); }
+:is(.v2-shell, [data-shell="v2"]) .v2-confirm-dialog > header { flex:none; padding:0; border:0; }
+/* Allow full-viewport fixed modals (Member Editor, Marketplace, Update Required) inside [data-grid] to escape inline-size containment in split mode */
+[data-grid]:has([data-bootcamp-host="cat-editor-modal"], .fixed.inset-0) { container-type:normal; }
+[data-bootcamp-host="cat-editor-modal"] { position:fixed; inset:0; z-index:120; display:flex; align-items:center; justify-content:center; padding:16px; }
+.member-editor-modal { width:min(880px, calc(100vw - 32px)) !important; max-width:880px !important; max-height:min(90dvh, 920px) !important; }
+.member-editor-modal [data-form="member"] { flex:1 1 0%; min-width:0; }
+.member-editor-modal #savebar:not([hidden]) { position:sticky; bottom:0; z-index:20; margin-top:16px; padding:12px 16px; border-radius:14px; border:1px solid var(--cafe-border-subtle); background:var(--console-card-bg, var(--cafe-surface)); box-shadow:0 -6px 20px rgb(0 0 0 / .08); }
+[data-v2-dialog] > [role="dialog"], [data-v2-dialog] > [role="alertdialog"] { box-sizing:border-box; min-width:min(440px, calc(100vw - 32px)); }
 [data-shell="v2"] #scrim { background:var(--console-overlay-backdrop); backdrop-filter:blur(4px); }
 [data-shell="v2"] .ui-tip { border:1px solid var(--shell-hairline); border-radius:12px; background:var(--shell-popover-bg); color:var(--shell-ink); padding:12px; font-size:12px; line-height:1.6; box-shadow:0 10px 30px rgba(43,33,26,.12); }
 .v2-shell .v2-config-color { width:36px; height:28px; border:0; padding:0; background:transparent; }

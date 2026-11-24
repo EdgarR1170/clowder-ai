@@ -159,7 +159,10 @@ button.avatar { border: 0; padding: 0; cursor: pointer; }
 .pop-center[data-within] { position-anchor: var(--u-within); position-visibility: always; inset: auto; top: anchor(top); left: anchor(left); width: anchor-size(width); bottom: anchor(--dock top, anchor(bottom)); padding: var(--sp-l); align-items: center; container-type: size; }   /* 区域里有停靠在底部的一块（落地页预览作品时沉下去的输入框）：弹窗只占它上面的空间，不压住它 */
 /* 弹窗（组件库，所有弹窗一套）：外边距是 --dlg-g；正文区是唯一的滚动区（.scroll），左右伸到弹窗边缘、内容仍对齐到 --dlg-g，
    所以滚动渐隐和滚动条贴着弹窗边；正文里的列表也伸到边缘，行内容对齐到同一条边——没有“弹窗边距 + 列表边距”的双重留白 */
-.dialog { --dlg-g: 24px; --dlg-chrome: calc(200px + min(calc(2 * var(--g-mod)), 10vh) - var(--sp-l)); background: var(--surf-anchor); border-radius: var(--r-xl); width: var(--span-6); padding: var(--dlg-g); display: flex; flex-direction: column; gap: var(--sp-m); max-height: 100%; overflow: clip; }
+.dialog { --dlg-g: 24px; --dlg-chrome: calc(200px + min(calc(2 * var(--g-mod)), 10vh) - var(--sp-l)); background: var(--surf-anchor); border-radius: var(--r-xl); width: min(560px, calc(100vw - 2 * var(--sp-l))); max-width: calc(100vw - 2 * var(--sp-l)); padding: var(--dlg-g); display: flex; flex-direction: column; gap: var(--sp-m); max-height: 100%; overflow: clip; }
+.dialog.dialog-wide { width: min(860px, calc(100vw - 2 * var(--sp-l))); }
+.dialog.dialog-viewport { width: min(1120px, calc(100vw - 2 * var(--sp-l))); height: calc(100dvh - 2 * var(--sp-l)); }
+.dialog.dialog-fill, .dialog.dialog-full { width: min(1160px, calc(100vw - 2 * var(--sp-l))); justify-self: center; }
 .dialog-body { --sf-size: calc(var(--row-h-1) * .5); display: flex; flex-direction: column; gap: var(--sp-m); min-height: 0; flex: 0 1 auto; max-height: calc(round(down, 100vh - var(--dlg-chrome), var(--row-h-1)) + .5 * var(--row-h-1)); margin: 0 calc(-1 * var(--dlg-g));   /* 切在半行：整数行（放得下的那么多，最多 --dlg-rows）+ 半行；窗口矮时整数行变少，仍然切在半行（声明，不量） */ padding: var(--sp-hair) var(--dlg-g); }
 .dialog[style*="--dlg-rows"] > .dialog-body { max-height: calc(round(down, min(var(--dlg-rows) * var(--row-h-1), 100vh - var(--dlg-chrome)), var(--row-h-1)) + .5 * var(--row-h-1)); }   /* 容器声明了最多几行：取它和页面里较小的 */
 .dialog-body > .group { margin: 0 calc(-1 * var(--dlg-g)); padding-inline: 0; border-radius: 0; background: none; }   /* 弹窗正文的构成：列表伸到弹窗边缘，行的内容和正文对齐到同一条边（没有双重留白） */

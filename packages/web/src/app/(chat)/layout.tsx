@@ -1,3 +1,4 @@
+import '../novel-studio-host.css';
 import { Suspense } from 'react';
 import { AppShell } from '@/components/AppShell';
 import { SessionBootstrap } from '@/components/SessionBootstrap';

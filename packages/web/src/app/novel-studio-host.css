@@ -1,0 +1,136 @@
+/* Scoped layout & utility supplement for NovelStudioWorkbench + AppShell inside (chat) route.
+ * Intentionally omits Tailwind Preflight so PDL library styles remain 100% intact. */
+
+.novel-app-shell {
+  width: 100vw;
+  height: 100dvh;
+}
+
+.novel-split-body {
+  display: flex;
+  flex: 1 1 0%;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.novel-pane-full {
+  flex: 1 1 100%;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.novel-pane-hidden {
+  display: none !important;
+}
+
+.novel-split-studio {
+  flex: 1 1 100%;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.novel-split-chat {
+  display: none;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+@media (min-width: 1024px) {
+  .novel-split-studio {
+    flex: 0 0 54%;
+    width: 54%;
+    max-width: 54%;
+    border-right: 1px solid var(--cafe-border);
+  }
+
+  .novel-split-chat {
+    display: block;
+    flex: 1 1 46%;
+    width: 46%;
+    min-width: 440px;
+  }
+}
+
+/* Missing Tailwind utilities referenced by NovelStudioWorkbench panels */
+.max-h-96 {
+  max-height: 24rem;
+}
+
+.min-w-44 {
+  min-width: 11rem;
+}
+
+.min-w-56 {
+  min-width: 14rem;
+}
+
+.min-w-60 {
+  min-width: 15rem;
+}
+
+.p-10 {
+  padding: 2.5rem;
+}
+
+.bg-semantic-info-surface {
+  background-color: var(--semantic-info-surface);
+}
+
+.hover\:bg-cafe-surface-canvas:hover {
+  background-color: var(--cafe-surface-canvas);
+}
+
+.file\:mr-2::file-selector-button {
+  margin-right: 0.5rem;
+}
+
+.file\:rounded::file-selector-button {
+  border-radius: 0.25rem;
+}
+
+.file\:border-0::file-selector-button {
+  border-width: 0;
+}
+
+.file\:bg-cafe-surface-sunken::file-selector-button {
+  background-color: var(--cafe-surface-sunken);
+}
+
+.file\:px-2::file-selector-button {
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+}
+
+.file\:py-1::file-selector-button {
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+}
+
+.file\:text-xs::file-selector-button {
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.file\:text-cafe::file-selector-button {
+  color: var(--cafe-text);
+}
+
+@media (min-width: 640px) {
+  .sm\:grid-cols-5 {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .sm\:grid-cols-6 {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}

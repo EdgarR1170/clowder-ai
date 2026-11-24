@@ -33,7 +33,7 @@ export const AppShell: FC<{ children: ReactNode }> = () => {
   };
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-cafe-surface-canvas">
+    <div className="novel-app-shell flex flex-col overflow-hidden bg-cafe-surface-canvas">
       {/* Slim Top Mode Switcher Bar */}
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-cafe bg-cafe-surface px-3">
         <div className="flex items-center gap-2 text-xs">
@@ -78,20 +78,16 @@ export const AppShell: FC<{ children: ReactNode }> = () => {
       </div>
 
       {/* Dual-Surface Container (keeps PdlAppHost mounted so WebSocket & cat streaming never drop) */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="novel-split-body">
         {mode !== 'chat' && (
-          <div
-            className={`h-full min-h-0 overflow-hidden ${
-              mode === 'split' ? 'w-full border-r border-cafe lg:w-7/12' : 'w-full'
-            }`}
-          >
+          <div className={mode === 'split' ? 'novel-split-studio' : 'novel-pane-full'}>
             <NovelStudioWorkbench onRequestSplitChat={() => changeMode('split')} />
           </div>
         )}
         <div
-          className={`h-full min-h-0 overflow-hidden ${
-            mode === 'studio' ? 'hidden' : mode === 'split' ? 'hidden lg:block lg:w-5/12' : 'w-full'
-          }`}
+          className={
+            mode === 'studio' ? 'novel-pane-hidden' : mode === 'split' ? 'novel-split-chat' : 'novel-pane-full'
+          }
         >
           <PdlAppHost />
         </div>
