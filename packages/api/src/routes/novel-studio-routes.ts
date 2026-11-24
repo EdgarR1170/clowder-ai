@@ -113,6 +113,39 @@ function sendError(reply: FastifyReply, err: unknown): { error: string } {
   return { error: message };
 }
 
+const DEFAULT_EDITORIAL_CATS = [
+  {
+    id: 'opus',
+    name: '布偶猫',
+    nickname: '宪宪',
+    roleDescription: '总编统筹与大纲架构师，擅长全局节奏把控与多猫调度',
+  },
+  {
+    id: 'kimi',
+    name: '梵花猫',
+    nickname: '墨墨',
+    roleDescription: '首席长篇主笔与去AI味润色师，擅长细腻中文正文执笔',
+  },
+  {
+    id: 'gemini',
+    name: '暹罗猫',
+    nickname: '烁烁',
+    roleDescription: '战斗分镜与场景氛围导演，擅长高燃动作调度与五感景深',
+  },
+  {
+    id: 'codex',
+    name: '缅因猫',
+    nickname: '砚砚',
+    roleDescription: '铁面审校官与连续性守护者，五轴评分与防穿帮核查',
+  },
+  {
+    id: 'glm52',
+    name: '狸花猫',
+    nickname: '小狸花',
+    roleDescription: '世界观与数值机制考据官，负责面板算术与设定严密性',
+  },
+] as const;
+
 export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = async (app, opts) => {
   const { runtime } = opts;
   const fallbackUser = opts.defaultOwnerUserId ?? 'owner';
@@ -125,13 +158,14 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
   });
 
   app.get('/api/novel-studio/overview', async () => {
-    const cats = Object.entries(catRegistry.getAllConfigs()).map(([id, c]) => ({
+    const registeredCats = Object.entries(catRegistry.getAllConfigs()).map(([id, c]) => ({
       id,
       name: c.name,
       nickname: c.nickname,
       roleDescription: c.roleDescription,
       color: c.color,
     }));
+    const cats = registeredCats.length > 0 ? registeredCats : [...DEFAULT_EDITORIAL_CATS];
     return {
       books: runtime.corpusStore.listBooks(),
       skills: runtime.skillCompiler.listSkills(),
