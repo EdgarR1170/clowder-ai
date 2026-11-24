@@ -1520,6 +1520,92 @@ skills:
     sop_step: null
     feature: "F167"
 
+  # ── Clowder-Novel 小说编辑部技能链 ──
+  novel-book-dissector:
+    category: "小说工程"
+    description: >
+      将参考小说（A大纲、B战斗、C人设、D场景、E机制、F文风）按单一指定维度拆解转化为可迁移的 Book-to-Skill 技法包。
+    triggers:
+      - "拆书"
+      - "小说解析"
+      - "萃取技法"
+      - "book-to-skill"
+      - "提炼文风"
+      - "抽离战斗描写"
+      - "抽离大纲"
+    not_for:
+      - "写读书摘要或剧情梗概"
+      - "日常章节正文执笔"
+    output: "标准 Book-to-Skill 技法包（SKILL.md + If-Then 规则 + 反模式 + StyleProfile）"
+    next: ["novel-chief-coordinator"]
+    sop_step: null
+
+  novel-chief-coordinator:
+    category: "小说工程"
+    description: >
+      总编猫统筹小说立项、卷级情节弧（story-arcs）、逐章细纲（chapter-outlines）与逐章多猫接力闭环。
+    triggers:
+      - "统筹章节"
+      - "开新小说"
+      - "生成卷纲"
+      - "生成章纲"
+      - "story-arcs"
+      - "chapter-outlines"
+      - "启动下一章"
+    not_for:
+      - "替代主笔直接默写整章初稿"
+      - "自审章节初稿"
+    output: "分层大纲产物、章前防穿帮工作包与多猫协调指令"
+    next: ["novel-chapter-writer", "novel-critic-gate"]
+    sop_step: null
+
+  novel-chapter-writer:
+    category: "小说工程"
+    description: >
+      主笔猫融合动态挂载的 A/B/C/D 多书技法 Skill、RAG 节拍骨架与章前防穿帮硬约束撰写或返修章节正文。
+    triggers:
+      - "写本章正文"
+      - "执笔章节"
+      - "按章纲成稿"
+      - "返修章节"
+    not_for:
+      - "修改全局大纲路线"
+      - "自审放行章节"
+    output: "章节初稿（raw）与结构化世界状态增量（proposedStateDelta）"
+    next: ["novel-critic-gate", "novel-humanizer-zh"]
+    sop_step: null
+
+  novel-critic-gate:
+    category: "小说工程"
+    description: >
+      独立审校猫对已提交章节初稿执行五轴散文评分、五轴节奏评估与防穿帮连续性门禁。
+    triggers:
+      - "审校章节"
+      - "五轴评分"
+      - "检查穿帮"
+      - "审稿"
+    not_for:
+      - "审查自己撰写的初稿"
+      - "直接覆盖重写整章"
+    output: "量化审校报告（approved 或 rewrite_required）与段落级修改处方"
+    next: ["novel-chapter-writer", "novel-humanizer-zh", "novel-chief-coordinator"]
+    sop_step: null
+
+  novel-humanizer-zh:
+    category: "小说工程"
+    description: >
+      中文网文去 AI 味精修，消除五官套话、机械排比与总结升华腔，保留剧情事实零篡改。
+    triggers:
+      - "去AI味"
+      - "润色章节"
+      - "消除翻译腔"
+      - "humanizer"
+    not_for:
+      - "大改剧情走向或增删核心设定事实"
+    output: "去 AI 味定稿正文（humanized）"
+    next: ["novel-chief-coordinator"]
+    sop_step: null
+
 # ─── 降级为 refs/（不再是独立 skill） ─────────────────
 refs:
   mcp-callbacks:

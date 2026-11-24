@@ -347,3 +347,22 @@ export {
   suggestionTools,
 } from './suggestion-tools.js';
 export { workTools } from './work-tools.js';
+export {
+  handleNovelCommitChapterCanon,
+  handleNovelDissectReference,
+  handleNovelEvaluateChapter,
+  handleNovelPrecheckChapter,
+  handleNovelReadProjectContext,
+  handleNovelSaveOutlineArtifacts,
+  handleNovelSearchReferenceBeats,
+  handleNovelSubmitChapterDraft,
+  novelCommitChapterCanonInputSchema,
+  novelDissectReferenceInputSchema,
+  novelEvaluateChapterInputSchema,
+  novelPrecheckChapterInputSchema,
+  novelReadProjectContextInputSchema,
+  novelSaveOutlineArtifactsInputSchema,
+  novelSearchReferenceBeatsInputSchema,
+  novelStudioTools,
+  novelSubmitChapterDraftInputSchema,
+} from './novel-studio-tools.js';

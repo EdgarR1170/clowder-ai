@@ -7832,6 +7832,36 @@ async function initializeApi(
     queueProcessor,
   });
 
+  // Clowder-Novel: Multi-book Dissector (sqlite-vec + Book-to-Skill) & Multi-Cat Chapter Coordinator
+  const { createNovelStudioRuntime } = await import('./domains/novel-studio/index.js');
+  const { callbackNovelStudioRoutes, createClowderThreadCoordinator, novelStudioRoutes } = await import(
+    './routes/novel-studio-routes.js'
+  );
+  const novelStudioRuntime = createNovelStudioRuntime({
+    workspaceRoot: findMonorepoRoot(process.cwd()),
+    getClowderEmbeddingService: () => memoryServices?.embeddingLifecycle.getService(),
+    threadCoordinator: createClowderThreadCoordinator({
+      threadStore,
+      messageStore,
+      invocationQueue,
+      queueProcessor,
+      ownerUserId: privateUserId,
+    }),
+  });
+  await app.register(novelStudioRoutes, {
+    runtime: novelStudioRuntime,
+    threadStore,
+    messageStore,
+    invocationQueue,
+    queueProcessor,
+    defaultOwnerUserId: privateUserId,
+  });
+  await app.register(callbackNovelStudioRoutes, {
+    runtime: novelStudioRuntime,
+    registry,
+  });
+  app.addHook('onClose', async () => novelStudioRuntime.close());
+
   // Serve uploaded files (images)
   const uploadDir = getDefaultUploadDir(process.env.UPLOAD_DIR);
   await app.register(uploadsRoutes, { uploadDir });

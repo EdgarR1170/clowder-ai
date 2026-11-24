@@ -1,0 +1,39 @@
+id: novel-creation
+domain: creative-writing
+label: Clowder Novel Multi-Agent Creation SOP
+description: 多书分维拆解（Book-to-Skill + 向量RAG）与多猫编辑部逐章协调创作标准流程
+stages:
+  - id: dissect_books
+    label: 多书分维拆解与技法蒸馏
+    suggested_skill: novel-book-dissector
+    hard_rules:
+      - id: novel-no-plot-copy
+        text: 拆书产物必须是可迁移的技法框架、If-Then决策规则与反模式，禁止提取原书人名地名与剧情梗概。
+        severity: blocker
+    pitfalls: []
+  - id: blueprint_and_arcs
+    label: 世界观蓝图与分层章纲
+    suggested_skill: novel-chief-coordinator
+    hard_rules: []
+    pitfalls: []
+  - id: chapter_drafting
+    label: 动态挂载技法与正文执笔
+    suggested_skill: novel-chapter-writer
+    hard_rules:
+      - id: novel-precheck-before-draft
+        text: 执笔前必须先运行 novel_precheck_chapter 读取角色生死、知情边界与数值面板硬约束。
+        severity: blocker
+    pitfalls: []
+  - id: cross_cat_review
+    label: 异构模型五轴审校与防穿帮
+    suggested_skill: novel-critic-gate
+    hard_rules:
+      - id: novel-no-self-review
+        text: 严禁执笔猫自审本章初稿，必须由不同 catId 的独立审校猫调用 novel_evaluate_chapter 完成五轴评分。
+        severity: blocker
+    pitfalls: []
+  - id: humanize_and_commit
+    label: 去AI味精修与状态账本入库
+    suggested_skill: novel-humanizer-zh
+    hard_rules: []
+    pitfalls: []

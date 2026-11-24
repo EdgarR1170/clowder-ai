@@ -82,6 +82,7 @@
     "eval:f212-reconciliation": "node scripts/eval-f212-abnormal-exit-reconciliation.mjs",
     "eval:f168-external-case-closure": "node scripts/run-f168-external-case-eval.mjs",
     "video:new": "node scripts/video-forge/new-project.mjs",
+    "test:novel": "pnpm --filter @cat-cafe/shared build && pnpm --filter @cat-cafe/mcp-server build && pnpm --filter @cat-cafe/api exec node --import ./test/helpers/setup-cat-registry.js --import tsx --test test/novel-studio/*.test.ts",
     "check:biome-review-worktrees": "node --test scripts/biome-review-worktrees-ignore.test.mjs",
     "check:video-new": "node --test test/scripts/video-new-project.test.mjs",
     "check:scripts-ascii-only": "node scripts/check-scripts-ascii-only.mjs",

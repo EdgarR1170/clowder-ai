@@ -89,6 +89,7 @@ export * from './message-search-notice.js';
 export * from './message-search-selection.js';
 // First-party host-tool identities shared by onboarding discovery and catalog repair.
 export * from './native-tool-identities.js';
+export * from './novel/index.js';
 export * from './plugin-archive-replacement.js';
 export * from './plugin-configuration-required.js';
 export * from './plugin-pdl.js';

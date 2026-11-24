@@ -247,3 +247,6 @@ packages/api/test/__b1_parent_a__/
 var/f309-artwork-preview/
 # Host-owned build output; release afterPack compiles its own target binary.
 desktop/plugin-window/native/app-assist
+
+# Local skill mount projections on Windows
+.claude/skills/
