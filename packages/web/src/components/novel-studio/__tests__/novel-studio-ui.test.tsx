@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ChapterPipelinePanel } from '../ChapterPipelinePanel';
 import { NovelStudioWorkbench } from '../NovelStudioWorkbench';
 
 vi.mock('../novel-studio-api', () => ({
@@ -15,12 +16,18 @@ vi.mock('../novel-studio-api', () => ({
       ],
     }),
     getProjectBundle: vi.fn().mockResolvedValue(null),
+    pauseProject: vi.fn(),
+    deleteChapterOutline: vi.fn(),
+    saveOutlines: vi.fn(),
+    startChapter: vi.fn(),
+    toggleAutoContinuous: vi.fn(),
   },
   fileToBase64: vi.fn(),
 }));
 
-describe('NovelStudioWorkbench', () => {
-  it('exports a valid React functional component', () => {
+describe('NovelStudioWorkbench & ChapterPipelinePanel', () => {
+  it('exports valid React functional components with human-intervention controls', () => {
     expect(typeof NovelStudioWorkbench).toBe('function');
+    expect(typeof ChapterPipelinePanel).toBe('function');
   });
 });

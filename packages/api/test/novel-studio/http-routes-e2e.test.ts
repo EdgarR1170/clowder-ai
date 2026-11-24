@@ -4,15 +4,38 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import Fastify from 'fastify';
+import { InvocationQueue } from '../../src/domains/cats/services/agents/invocation/InvocationQueue.js';
 import { InvocationRegistry } from '../../src/domains/cats/services/agents/invocation/InvocationRegistry.js';
+import { InvocationTracker } from '../../src/domains/cats/services/agents/invocation/InvocationTracker.js';
+import { ThreadStore } from '../../src/domains/cats/services/stores/ports/ThreadStore.js';
 import { createNovelStudioRuntime } from '../../src/domains/novel-studio/index.js';
-import { callbackNovelStudioRoutes, novelStudioRoutes } from '../../src/routes/novel-studio-routes.js';
+import {
+  callbackNovelStudioRoutes,
+  createClowderThreadCoordinator,
+  novelStudioRoutes,
+} from '../../src/routes/novel-studio-routes.js';
 
 describe('Clowder-Novel: REST & MCP Callback HTTP Routes End-to-End', () => {
   const tempRoot = mkdtempSync(join(tmpdir(), 'clowder-novel-http-'));
+  const threadStore = new ThreadStore();
+  const invocationQueue = new InvocationQueue();
+  const invocationTracker = new InvocationTracker();
+  const drainedThreads: string[] = [];
+  const queueProcessor = {
+    async requestDrain(threadId: string) {
+      drainedThreads.push(threadId);
+    },
+  };
   const runtime = createNovelStudioRuntime({
     workspaceRoot: tempRoot,
     dataDir: join(tempRoot, 'data', 'novel-studio'),
+    threadCoordinator: createClowderThreadCoordinator({
+      threadStore,
+      invocationQueue,
+      invocationTracker,
+      queueProcessor,
+      ownerUserId: 'edgar',
+    }),
   });
   const registry = new InvocationRegistry();
 
@@ -25,6 +48,10 @@ describe('Clowder-Novel: REST & MCP Callback HTTP Routes End-to-End', () => {
     const app = Fastify();
     await app.register(novelStudioRoutes, {
       runtime,
+      threadStore,
+      invocationQueue,
+      invocationTracker,
+      queueProcessor,
       defaultOwnerUserId: 'edgar',
     });
     await app.register(callbackNovelStudioRoutes, {
@@ -216,6 +243,130 @@ describe('Clowder-Novel: REST & MCP Callback HTTP Routes End-to-End', () => {
     });
     assert.equal(exportRes.statusCode, 200);
     assert.match((exportRes.json() as { content: string }).content, /风雪渡口/);
+
+    // 5. Verify HTTP Emergency Pause (withdraws real private_input Queue entries + cancels active InvocationTracker slots) + Outline Edit/Delete + Reset
+    await app.inject({
+      method: 'PUT',
+      url: `/api/novel-studio/projects/${projectId}/outlines`,
+      remoteAddress: '127.0.0.1',
+      payload: {
+        chapterOutlines: [
+          {
+            chapterNo: 2,
+            volumeNo: 1,
+            title: '雪夜追踪',
+            goal: '顺着血迹追查断剑客',
+            conflict: '风雪掩盖踪迹',
+            outcome: '发现破庙暗门',
+            hook: '暗门内传来铁链声',
+            povCharacterId: '',
+            targetWords: 3000,
+            beats: [
+              {
+                beatIndex: 1,
+                summary: '雪林追踪',
+                primaryDimension: 'scene_atmosphere',
+                secondaryDimensions: [],
+                castIds: [],
+                locationId: 'woods',
+                ragQueryHint: '风雪脚印',
+                targetWords: 3000,
+              },
+            ],
+            foreshadowingToPlant: [],
+            foreshadowingToPayoff: [],
+          },
+          {
+            chapterNo: 3,
+            volumeNo: 1,
+            title: '多余草稿章',
+            goal: '待删除',
+            conflict: '无',
+            outcome: '无',
+            hook: '无',
+            povCharacterId: '',
+            targetWords: 2000,
+            beats: [
+              {
+                beatIndex: 1,
+                summary: '临时占位',
+                primaryDimension: 'plot_arc',
+                secondaryDimensions: [],
+                castIds: [],
+                locationId: '',
+                ragQueryHint: '',
+                targetWords: 2000,
+              },
+            ],
+            foreshadowingToPlant: [],
+            foreshadowingToPayoff: [],
+          },
+        ],
+      },
+    });
+
+    // Enable auto-continuous starting from Chapter 2 -> creates real editorial thread & enqueues private_input to @opus
+    const autoRes = await app.inject({
+      method: 'POST',
+      url: `/api/novel-studio/projects/${projectId}/auto-continuous`,
+      remoteAddress: '127.0.0.1',
+      payload: { enabled: true, maxChapters: 2, startFromChapterNo: 2 },
+    });
+    assert.equal(autoRes.statusCode, 200);
+    const linkedThreadId = (autoRes.json() as { project: { threadId: string } }).project.threadId;
+    assert.ok(linkedThreadId);
+    assert.equal(invocationQueue.list(linkedThreadId, 'edgar').length, 1);
+
+    // Simulate an active running cat ('kimi') in InvocationTracker on that editorial thread
+    const activeController = invocationTracker.start(linkedThreadId, 'kimi', 'edgar');
+    assert.equal(activeController.signal.aborted, false);
+
+    // Operator hits POST /pause -> aborts 'kimi', withdraws private_input queue entry, pauses Ch.2!
+    const pauseRes = await app.inject({
+      method: 'POST',
+      url: `/api/novel-studio/projects/${projectId}/pause`,
+      remoteAddress: '127.0.0.1',
+      payload: {},
+    });
+    assert.equal(pauseRes.statusCode, 200);
+    const pauseJson = pauseRes.json() as {
+      pausedChapterNos: number[];
+      cancelledCats: string[];
+      withdrawnQueueCount: number;
+      project: { workflow: { approvalMode: string }; chapters: Record<string, { stage: string }> };
+    };
+    assert.deepEqual(pauseJson.pausedChapterNos, [2]);
+    assert.deepEqual(pauseJson.cancelledCats, ['kimi']);
+    assert.equal(pauseJson.withdrawnQueueCount, 1);
+    assert.equal(activeController.signal.aborted, true);
+    assert.equal(invocationQueue.list(linkedThreadId, 'edgar').length, 0);
+    assert.equal(pauseJson.project.workflow.approvalMode, 'chapter-gate');
+    assert.equal(pauseJson.project.chapters['2']?.stage, 'paused');
+
+    // Delete Chapter 3 outline & reset-restart Chapter 2 after editing outline
+    const delOutlineRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/novel-studio/projects/${projectId}/outlines/3`,
+      remoteAddress: '127.0.0.1',
+    });
+    assert.equal(delOutlineRes.statusCode, 200);
+    assert.equal(
+      (delOutlineRes.json() as { project: { chapterOutlines: unknown[] } }).project.chapterOutlines.length,
+      2,
+    );
+
+    const restartRes = await app.inject({
+      method: 'POST',
+      url: `/api/novel-studio/projects/${projectId}/chapters/2/start`,
+      remoteAddress: '127.0.0.1',
+      payload: { wakeCatsInThread: true, resetExistingDraft: true },
+    });
+    assert.equal(restartRes.statusCode, 200);
+    assert.equal(
+      (restartRes.json() as { bundle: { project: { chapters: Record<string, { stage: string }> } } }).bundle.project
+        .chapters['2']?.stage,
+      'drafting',
+    );
 
     await app.close();
   });

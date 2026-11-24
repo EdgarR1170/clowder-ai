@@ -18,6 +18,7 @@ import {
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
+import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
 import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
 import type { AnyMessageStore } from '../domains/cats/services/stores/factories/MessageStoreFactory.js';
 import type { IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
@@ -36,7 +37,8 @@ export interface NovelStudioRoutesOptions {
   threadStore?: IThreadStore;
   messageStore?: AnyMessageStore;
   invocationQueue?: InvocationQueue;
-  queueProcessor?: Pick<QueueProcessor, 'requestDrain'>;
+  invocationTracker?: Pick<InvocationTracker, 'cancelAll'>;
+  queueProcessor?: Pick<QueueProcessor, 'requestDrain'> & Partial<Pick<QueueProcessor, 'unregisterEntryCompleteHook'>>;
   defaultOwnerUserId?: string;
 }
 
@@ -50,7 +52,8 @@ export function createClowderThreadCoordinator(deps: {
   threadStore: IThreadStore;
   messageStore?: AnyMessageStore;
   invocationQueue: InvocationQueue;
-  queueProcessor: Pick<QueueProcessor, 'requestDrain'>;
+  invocationTracker?: Pick<InvocationTracker, 'cancelAll'>;
+  queueProcessor: Pick<QueueProcessor, 'requestDrain'> & Partial<Pick<QueueProcessor, 'unregisterEntryCompleteHook'>>;
   ownerUserId: string;
 }): ThreadCoordinatorPort {
   return {
@@ -95,6 +98,37 @@ export function createClowderThreadCoordinator(deps: {
       if (enqueue.outcome === 'enqueued') {
         await deps.queueProcessor.requestDrain(threadId);
       }
+    },
+    async abortEditorialThread(threadId) {
+      let withdrawnQueueCount = 0;
+      const candidates = deps.invocationQueue.list(threadId, deps.ownerUserId);
+      for (const candidate of candidates) {
+        if (candidate.status === 'processing') continue;
+        const claimed = await deps.invocationQueue.claimQueuedEntryForWithdrawal(
+          threadId,
+          deps.ownerUserId,
+          candidate.id,
+        );
+        if (!claimed) continue;
+        try {
+          const removed = await deps.invocationQueue.commitClaimedWithdrawal(threadId, claimed.id);
+          if (removed) {
+            withdrawnQueueCount += 1;
+            deps.queueProcessor.unregisterEntryCompleteHook?.(claimed.id);
+          } else {
+            await deps.invocationQueue.restoreClaimedEntries(threadId, [claimed.id]);
+          }
+        } catch {
+          await deps.invocationQueue.restoreClaimedEntries(threadId, [claimed.id]);
+        }
+      }
+      const cancelled = deps.invocationTracker
+        ? deps.invocationTracker.cancelAll(threadId, deps.ownerUserId, 'novel_operator_pause')
+        : { catIds: [] };
+      return {
+        cancelledCats: cancelled.catIds,
+        withdrawnQueueCount,
+      };
     },
   };
 }
@@ -471,10 +505,33 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
           worldBlueprintMarkdown: z.string().optional(),
           storyArcs: z.array(storyArcSchema).optional(),
           chapterOutlines: z.array(chapterOutlineSchema).optional(),
+          replaceAllChapterOutlines: z.boolean().optional(),
         })
         .parse(request.body);
       const project = runtime.orchestrator.saveOutlineArtifacts(projectId, body);
       return { project };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.delete('/api/novel-studio/projects/:projectId/outlines/:chapterNo', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const project = runtime.orchestrator.deleteChapterOutline(projectId, chapterNo);
+      return { project };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/novel-studio/projects/:projectId/pause', async (request, reply) => {
+    try {
+      const { projectId } = z.object({ projectId: z.string().min(1) }).parse(request.params);
+      const paused = await runtime.orchestrator.pauseEditorialRun(projectId);
+      return { ...paused, bundle: runtime.projectStore.loadBundle(projectId) };
     } catch (err) {
       return sendError(reply, err);
     }
@@ -572,9 +629,15 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
       const { projectId, chapterNo } = z
         .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
         .parse(request.params);
-      const body = z.object({ wakeCatsInThread: z.boolean().default(true) }).parse(request.body ?? {});
+      const body = z
+        .object({
+          wakeCatsInThread: z.boolean().default(true),
+          resetExistingDraft: z.boolean().default(false),
+        })
+        .parse(request.body ?? {});
       const packet = await runtime.orchestrator.prepareAndStartChapter(projectId, chapterNo, {
         wakeCatsInThread: body.wakeCatsInThread,
+        resetExistingDraft: body.resetExistingDraft,
       });
       return { packet, bundle: runtime.projectStore.loadBundle(projectId) };
     } catch (err) {
@@ -664,9 +727,17 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
         .object({
           enabled: z.boolean(),
           maxChapters: z.number().int().min(1).max(50).optional(),
+          startFromChapterNo: z.number().int().min(1).optional(),
+          resetStartChapterDraft: z.boolean().default(false),
         })
         .parse(request.body);
-      const project = await runtime.orchestrator.toggleAutoContinuous(projectId, body.enabled, body.maxChapters);
+      const project = await runtime.orchestrator.toggleAutoContinuous(
+        projectId,
+        body.enabled,
+        body.maxChapters,
+        body.startFromChapterNo,
+        body.resetStartChapterDraft,
+      );
       return { project };
     } catch (err) {
       return sendError(reply, err);

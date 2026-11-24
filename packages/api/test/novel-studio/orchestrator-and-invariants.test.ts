@@ -12,6 +12,7 @@ import {
 describe('Clowder-Novel: InvariantChecker, Humanizer-zh & Multi-Cat Chapter Orchestrator', () => {
   const tempRoot = mkdtempSync(join(tmpdir(), 'clowder-novel-orchestrator-'));
   const dispatches: Array<{ threadId: string; targetCatId: string; markdown: string }> = [];
+  const abortedThreads: string[] = [];
 
   const mockCoordinator: ThreadCoordinatorPort = {
     async ensureEditorialThread({ existingThreadId }) {
@@ -19,6 +20,10 @@ describe('Clowder-Novel: InvariantChecker, Humanizer-zh & Multi-Cat Chapter Orch
     },
     async dispatchToCat(msg) {
       dispatches.push(msg);
+    },
+    async abortEditorialThread(threadId) {
+      abortedThreads.push(threadId);
+      return { cancelledCats: ['kimi'], withdrawnQueueCount: 2 };
     },
   };
 
@@ -372,5 +377,228 @@ describe('Clowder-Novel: InvariantChecker, Humanizer-zh & Multi-Cat Chapter Orch
     const rolledBack = runtime.orchestrator.rollbackToChapter(projectId, 0);
     assert.equal(rolledBack.mechanics.entities[0]!.stats.stamina, 80);
     assert.ok(!rolledBack.canon.characters[0]!.inventory.includes('城主府玄铁密令'));
+  });
+
+  it('supports human mid-run pause, outline & beat dimension editing, clean draft reset, and resume from edited chapter', async () => {
+    const personaRef = await runtime.ingestAndIndexBook({
+      title: '权谋对话录',
+      fileName: 'persona-ref.txt',
+      buffer: Buffer.from(
+        '第一章 茶楼机锋\n她指尖轻叩茶盏，似笑非笑地望着对面的密探，三言两语便试出对方底牌。',
+        'utf8',
+      ),
+    });
+    const personaSkill = runtime.skillCompiler.compileFromBookSamples({
+      book: personaRef!,
+      dimension: 'character_persona',
+      sampledChunks: runtime.corpusStore.sampleRepresentativeChunks(personaRef!.id, 'character_persona', 2),
+      slug: 'craft-persona-subtext',
+    });
+
+    const created = runtime.projectStore.createProject({
+      title: '停机改纲测试集',
+      genre: '架空权谋',
+      premise: '随时暂停并调整大纲走向',
+    });
+    const pid = created.project.id;
+
+    runtime.orchestrator.updateDimensionMatrix(pid, [
+      {
+        dimension: 'character_persona',
+        skillSlugs: [personaSkill.slug],
+        referenceBookIds: [personaRef!.id],
+        ragWeight: 0.9,
+        ragMode: 'structural_beats',
+      },
+    ]);
+
+    runtime.orchestrator.saveOutlineArtifacts(pid, {
+      chapterOutlines: [
+        {
+          chapterNo: 1,
+          volumeNo: 1,
+          title: '旧版第一章',
+          goal: '正面强攻',
+          conflict: '守卫森严',
+          outcome: '受挫',
+          hook: '警钟长鸣',
+          povCharacterId: '',
+          targetWords: 3000,
+          beats: [
+            {
+              beatIndex: 1,
+              summary: '强闯城门硬拼',
+              primaryDimension: 'battle_action',
+              secondaryDimensions: [],
+              castIds: [],
+              locationId: '',
+              ragQueryHint: '硬拼',
+              targetWords: 3000,
+            },
+          ],
+          foreshadowingToPlant: [],
+          foreshadowingToPayoff: [],
+        },
+        {
+          chapterNo: 2,
+          volumeNo: 1,
+          title: '废弃支线章',
+          goal: '支线过渡',
+          conflict: '无',
+          outcome: '过渡',
+          hook: '夜色降临',
+          povCharacterId: '',
+          targetWords: 2500,
+          beats: [
+            {
+              beatIndex: 1,
+              summary: '闲逛集市',
+              primaryDimension: 'plot_arc',
+              secondaryDimensions: [],
+              castIds: [],
+              locationId: '',
+              ragQueryHint: '',
+              targetWords: 2500,
+            },
+          ],
+          foreshadowingToPlant: [],
+          foreshadowingToPayoff: [],
+        },
+        {
+          chapterNo: 3,
+          volumeNo: 1,
+          title: '第三章·真正的暗线',
+          goal: '揭开内应身份',
+          conflict: '真假密信',
+          outcome: '锁定内鬼',
+          hook: '密信落款竟是故人',
+          povCharacterId: '',
+          targetWords: 3200,
+          beats: [
+            {
+              beatIndex: 1,
+              summary: '茶楼试探',
+              primaryDimension: 'character_persona',
+              secondaryDimensions: [],
+              castIds: [],
+              locationId: '',
+              ragQueryHint: '茶盏试探',
+              targetWords: 3200,
+            },
+          ],
+          foreshadowingToPlant: [],
+          foreshadowingToPayoff: [],
+        },
+      ],
+    });
+
+    // 1. Start auto-continuous & simulate partial draft in flight
+    await runtime.orchestrator.toggleAutoContinuous(pid, true, 3);
+    await runtime.orchestrator.submitChapterDraft({
+      projectId: pid,
+      chapterNo: 1,
+      authorCatId: 'kimi',
+      draftKind: 'raw',
+      content: '旧版强攻草稿内容，作者看了一半决定推翻重改大纲。',
+    });
+
+    // 2. Human clicks Emergency Pause!
+    const paused = await runtime.orchestrator.pauseEditorialRun(pid);
+    assert.equal(paused.project.workflow.approvalMode, 'chapter-gate');
+    assert.equal(paused.project.workflow.autoRemainingChapters, 0);
+    assert.deepEqual(paused.pausedChapterNos, [1]);
+    assert.equal(paused.project.chapters['1']?.stage, 'paused');
+    assert.deepEqual(paused.cancelledCats, ['kimi']);
+    assert.equal(paused.withdrawnQueueCount, 2);
+    assert.ok(abortedThreads.includes('thread-novel-editorial-01'));
+
+    // 3. Human deletes unwanted Chapter 2 outline & edits Chapter 1 outline (switching beat from battle_action -> character_persona!)
+    const afterDelete = runtime.orchestrator.deleteChapterOutline(pid, 2);
+    assert.deepEqual(
+      afterDelete.chapterOutlines.map((o) => o.chapterNo),
+      [1, 3],
+    );
+
+    runtime.orchestrator.saveOutlineArtifacts(pid, {
+      chapterOutlines: [
+        {
+          chapterNo: 1,
+          volumeNo: 1,
+          title: '新版第一章·茶楼试探',
+          goal: '不动声色套出守备换防时辰',
+          conflict: '副统领言语试探',
+          outcome: '拿到换防腰牌',
+          hook: '茶盏底部刻着内应暗记',
+          povCharacterId: '',
+          targetWords: 3200,
+          beats: [
+            {
+              beatIndex: 1,
+              summary: '茶席潜台词机锋博弈',
+              primaryDimension: 'character_persona',
+              secondaryDimensions: [],
+              castIds: [],
+              locationId: '',
+              ragQueryHint: '茶盏试探底牌',
+              targetWords: 3200,
+            },
+          ],
+          foreshadowingToPlant: [],
+          foreshadowingToPayoff: [],
+        },
+      ],
+    });
+
+    // 4. Reset & restart from edited Chapter 1 -> wipes stale draft and mounts craft-persona-subtext!
+    const restartedPacket = await runtime.orchestrator.prepareAndStartChapter(pid, 1, {
+      wakeCatsInThread: true,
+      resetExistingDraft: true,
+    });
+    assert.equal(restartedPacket.outline.title, '新版第一章·茶楼试探');
+    assert.ok(restartedPacket.activeSkills.some((s) => s.slug === 'craft-persona-subtext'));
+    const ch1Record = runtime.projectStore.loadBundle(pid)!.project.chapters['1']!;
+    assert.equal(ch1Record.rawDraft, '');
+    assert.equal(ch1Record.stage, 'drafting');
+
+    // 5. Resume auto-continuous from Chapter 1 -> commits Ch.1 and smartly advances to Ch.3 (since Ch.2 was deleted)!
+    await runtime.orchestrator.toggleAutoContinuous(pid, true, 2, 1, false);
+    await runtime.orchestrator.submitChapterDraft({
+      projectId: pid,
+      chapterNo: 1,
+      authorCatId: 'kimi',
+      draftKind: 'raw',
+      content: '茶烟袅袅，沈砚指尖轻叩青瓷盏沿，三句闲谈便逼得副统领额角渗出细汗，乖乖递过换防腰牌。'.repeat(2),
+    });
+    const evalCh1 = await runtime.orchestrator.evaluateChapter({
+      projectId: pid,
+      chapterNo: 1,
+      reviewerCatId: 'codex',
+      proseScores: {
+        showDontTell: 0.88,
+        characterVoice: 0.9,
+        craftSkillFidelity: 0.9,
+        cadenceAndVariety: 0.85,
+        goalAndHook: 0.88,
+        rewriteDirectives: [],
+      },
+      pacingScores: {
+        tensionMomentum: 0.85,
+        infoDensity: 0.84,
+        emotionalOscillation: 0.82,
+        arcProgression: 0.86,
+        readerFatigueGuard: 0.88,
+        pacingGuidance: '',
+      },
+      summaryCritique: '改纲后潜台词交锋极佳，准予定稿！',
+      wakeNextCat: true,
+    });
+    assert.equal(evalCh1.nextStage, 'committed');
+
+    const finalBundle = runtime.projectStore.loadBundle(pid)!;
+    assert.equal(finalBundle.project.currentChapterNo, 3);
+    assert.equal(finalBundle.project.chapters['3']?.stage, 'drafting');
+
+    // Committed Chapter 1 outline CANNOT be deleted without rollback
+    assert.throws(() => runtime.orchestrator.deleteChapterOutline(pid, 1), /已定稿入账/);
   });
 });

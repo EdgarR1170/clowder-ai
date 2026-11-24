@@ -81,6 +81,7 @@ export type StoryArc = z.infer<typeof storyArcSchema>;
 
 export const CHAPTER_STAGES = [
   'planned',
+  'paused',
   'prechecking',
   'drafting',
   'reviewing',

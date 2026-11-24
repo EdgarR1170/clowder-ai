@@ -7844,6 +7844,7 @@ async function initializeApi(
       threadStore,
       messageStore,
       invocationQueue,
+      invocationTracker,
       queueProcessor,
       ownerUserId: privateUserId,
     }),
@@ -7853,6 +7854,7 @@ async function initializeApi(
     threadStore,
     messageStore,
     invocationQueue,
+    invocationTracker,
     queueProcessor,
     defaultOwnerUserId: privateUserId,
   });

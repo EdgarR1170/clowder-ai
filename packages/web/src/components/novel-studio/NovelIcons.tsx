@@ -137,3 +137,61 @@ export const DownloadIcon: FC<IconProps> = ({ className = 'h-4 w-4' }) => (
     <line x1="12" y1="15" x2="12" y2="3" />
   </svg>
 );
+
+export const PauseStopIcon: FC<IconProps> = ({ className = 'h-3.5 w-3.5' }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.75"
+    className={className}
+    aria-hidden="true"
+  >
+    <circle cx="12" cy="12" r="9" />
+    <rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" />
+  </svg>
+);
+
+export const EditIcon: FC<IconProps> = ({ className = 'h-3.5 w-3.5' }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.75"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+  </svg>
+);
+
+export const RotateResetIcon: FC<IconProps> = ({ className = 'h-3.5 w-3.5' }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.75"
+    className={className}
+    aria-hidden="true"
+  >
+    <polyline points="1 4 1 10 7 10" />
+    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+  </svg>
+);
+
+export const TrashIcon: FC<IconProps> = ({ className = 'h-3.5 w-3.5' }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.75"
+    className={className}
+    aria-hidden="true"
+  >
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    <path d="M10 11v6M14 11v6" />
+    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+  </svg>
+);

@@ -33,6 +33,10 @@ export interface ThreadCoordinatorPort {
     catIds: string[];
   }): Promise<string | undefined>;
   dispatchToCat(params: { threadId: string; targetCatId: string; markdown: string }): Promise<void>;
+  abortEditorialThread?(threadId: string): Promise<{
+    cancelledCats: string[];
+    withdrawnQueueCount: number;
+  }>;
 }
 
 export interface ChapterWorkPacket {
@@ -99,6 +103,7 @@ export class ChapterOrchestrator {
       worldBlueprintMarkdown?: string;
       storyArcs?: StoryArc[];
       chapterOutlines?: ChapterOutline[];
+      replaceAllChapterOutlines?: boolean;
     },
   ): NovelProject {
     const bundle = this.mustLoad(projectId);
@@ -109,25 +114,111 @@ export class ChapterOrchestrator {
       bundle.project.storyArcs = input.storyArcs.map((a) => storyArcSchema.parse(a));
     }
     if (input.chapterOutlines !== undefined) {
-      const merged = new Map(bundle.project.chapterOutlines.map((o) => [o.chapterNo, o]));
-      for (const raw of input.chapterOutlines) {
-        const parsed = chapterOutlineSchema.parse(raw);
-        merged.set(parsed.chapterNo, parsed);
+      if (input.replaceAllChapterOutlines) {
+        bundle.project.chapterOutlines = input.chapterOutlines
+          .map((raw) => chapterOutlineSchema.parse(raw))
+          .sort((a, b) => a.chapterNo - b.chapterNo);
+      } else {
+        const merged = new Map(bundle.project.chapterOutlines.map((o) => [o.chapterNo, o]));
+        for (const raw of input.chapterOutlines) {
+          const parsed = chapterOutlineSchema.parse(raw);
+          merged.set(parsed.chapterNo, parsed);
+        }
+        bundle.project.chapterOutlines = [...merged.values()].sort((a, b) => a.chapterNo - b.chapterNo);
       }
-      bundle.project.chapterOutlines = [...merged.values()].sort((a, b) => a.chapterNo - b.chapterNo);
     }
     this.store.saveBundle(bundle.project);
     return this.mustLoad(projectId).project;
   }
 
+  deleteChapterOutline(projectId: string, chapterNo: number): NovelProject {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    const existingRecord = project.chapters[String(chapterNo)];
+    if (existingRecord?.stage === 'committed') {
+      throw new Error(`第 ${chapterNo} 章已定稿入账，不可直接删除章纲；如需重来请先回滚至第 ${chapterNo - 1} 章。`);
+    }
+    const beforeLen = project.chapterOutlines.length;
+    project.chapterOutlines = project.chapterOutlines.filter((o) => o.chapterNo !== chapterNo);
+    if (project.chapterOutlines.length === beforeLen) {
+      throw new Error(`Chapter ${chapterNo} outline not found`);
+    }
+    delete project.chapters[String(chapterNo)];
+    if (project.currentChapterNo === chapterNo) {
+      const nextUncommitted = project.chapterOutlines.find(
+        (o) => project.chapters[String(o.chapterNo)]?.stage !== 'committed',
+      );
+      if (nextUncommitted) {
+        project.currentChapterNo = nextUncommitted.chapterNo;
+      }
+    }
+    this.store.saveBundle(project);
+    return this.mustLoad(projectId).project;
+  }
+
+  /**
+   * Emergency Stop / Human Intervention Pause:
+   * 1. Switches approvalMode to 'chapter-gate' and zeroes autoRemainingChapters so auto-run cannot advance.
+   * 2. Marks any in-flight chapter ('prechecking' | 'drafting' | 'reviewing' | 'rewriting' | 'humanizing') as 'paused',
+   *    preserving any partial drafts/notes already saved.
+   * 3. Withdraws all pending queue items in the editorial thread (including private_input dispatches)
+   *    and cancels all active cat invocations via InvocationTracker.
+   */
+  async pauseEditorialRun(projectId: string): Promise<{
+    project: NovelProject;
+    pausedChapterNos: number[];
+    cancelledCats: string[];
+    withdrawnQueueCount: number;
+  }> {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    project.workflow.approvalMode = 'chapter-gate';
+    project.workflow.autoRemainingChapters = 0;
+
+    const activeStages = new Set<ChapterStateRecord['stage']>([
+      'prechecking',
+      'drafting',
+      'reviewing',
+      'rewriting',
+      'humanizing',
+    ]);
+    const pausedChapterNos: number[] = [];
+    const now = new Date().toISOString();
+
+    for (const rec of Object.values(project.chapters)) {
+      if (rec && activeStages.has(rec.stage)) {
+        rec.stage = 'paused';
+        rec.updatedAt = now;
+        pausedChapterNos.push(rec.chapterNo);
+      }
+    }
+
+    this.store.saveBundle(project);
+
+    let cancelledCats: string[] = [];
+    let withdrawnQueueCount = 0;
+    if (project.threadId && this.threadCoordinator?.abortEditorialThread) {
+      const aborted = await this.threadCoordinator.abortEditorialThread(project.threadId);
+      cancelledCats = aborted.cancelledCats;
+      withdrawnQueueCount = aborted.withdrawnQueueCount;
+    }
+
+    return {
+      project: this.mustLoad(projectId).project,
+      pausedChapterNos: pausedChapterNos.sort((a, b) => a - b),
+      cancelledCats,
+      withdrawnQueueCount,
+    };
+  }
+
   /**
    * Step 1 of Chapter Loop (Precheck + Dynamic Skill & RAG Assembly):
-   * Invoked by Chief Editor Cat or Web UI to kick off Chapter N.
+   * Invoked by Chief Editor Cat or Web UI to kick off (or reset & re-run) Chapter N.
    */
   async prepareAndStartChapter(
     projectId: string,
     chapterNo: number,
-    options: { wakeCatsInThread?: boolean } = {},
+    options: { wakeCatsInThread?: boolean; resetExistingDraft?: boolean } = {},
   ): Promise<ChapterWorkPacket> {
     const bundle = this.mustLoad(projectId);
     const { project, canon, mechanics } = bundle;
@@ -136,6 +227,11 @@ export class ChapterOrchestrator {
       throw new Error(
         `Chapter ${chapterNo} outline not found in project "${project.title}". Generate chapter-outlines first.`,
       );
+    }
+
+    const existingRecord = project.chapters[String(chapterNo)];
+    if (existingRecord?.stage === 'committed' && options.resetExistingDraft) {
+      throw new Error(`第 ${chapterNo} 章已定稿入账；如需按新纲重写已入账章节，请先回滚至第 ${chapterNo - 1} 章。`);
     }
 
     // 1. Run InvariantChecker pre-scene check
@@ -196,25 +292,25 @@ export class ChapterOrchestrator {
       }
     }
 
-    const existingRecord = project.chapters[String(chapterNo)];
+    const resetDraft = Boolean(options.resetExistingDraft);
     const now = new Date().toISOString();
     const nextRecord: ChapterStateRecord = {
       chapterNo,
       stage: 'drafting',
-      rewriteRound: existingRecord?.rewriteRound ?? 0,
+      rewriteRound: resetDraft ? 0 : (existingRecord?.rewriteRound ?? 0),
       activeSkillSlugs: [...activeSkillSlugs],
       precheckConstraintsMarkdown: precheck.constraintsMarkdown,
       precheckWarnings: precheck.violations,
       ragPassages,
-      specialistNotes: existingRecord?.specialistNotes ?? '',
-      rawDraft: existingRecord?.rawDraft ?? '',
-      humanizedDraft: existingRecord?.humanizedDraft ?? '',
-      finalText: existingRecord?.finalText ?? '',
-      qualityHistory: existingRecord?.qualityHistory ?? [],
-      proposedStateDelta: existingRecord?.proposedStateDelta,
+      specialistNotes: resetDraft ? '' : (existingRecord?.specialistNotes ?? ''),
+      rawDraft: resetDraft ? '' : (existingRecord?.rawDraft ?? ''),
+      humanizedDraft: resetDraft ? '' : (existingRecord?.humanizedDraft ?? ''),
+      finalText: resetDraft ? '' : (existingRecord?.finalText ?? ''),
+      qualityHistory: resetDraft ? [] : (existingRecord?.qualityHistory ?? []),
+      proposedStateDelta: resetDraft ? undefined : existingRecord?.proposedStateDelta,
       writerCatId: project.catRoster.writerCatId,
       criticCatId: project.catRoster.criticCatId,
-      authorNotes: existingRecord?.authorNotes ?? '',
+      authorNotes: resetDraft ? '' : (existingRecord?.authorNotes ?? ''),
       updatedAt: now,
     };
 
@@ -308,6 +404,7 @@ export class ChapterOrchestrator {
     const bundle = this.mustLoad(params.projectId);
     const { project } = bundle;
     const record = this.mustChapterRecord(project, params.chapterNo);
+    const wasPaused = record.stage === 'paused';
     const styleSkill = record.activeSkillSlugs
       .map((s) => this.skillCompiler.getSkill(s)?.spec.styleProfile)
       .find((sp) => sp !== undefined);
@@ -320,13 +417,17 @@ export class ChapterOrchestrator {
       record.rawDraft = params.content.trim();
       record.writerCatId = params.authorCatId;
       record.proposedStateDelta = parsedDelta;
-      record.stage = 'reviewing';
+      record.stage = wasPaused ? 'paused' : 'reviewing';
     } else {
       const cleaned = lightPolishAiCliches(params.content.trim());
       record.humanizedDraft = cleaned;
       record.finalText = cleaned;
       if (parsedDelta) record.proposedStateDelta = parsedDelta;
-      record.stage = project.workflow.approvalMode === 'auto-continuous' ? 'committed' : 'awaiting_approval';
+      record.stage = wasPaused
+        ? 'paused'
+        : project.workflow.approvalMode === 'auto-continuous'
+          ? 'committed'
+          : 'awaiting_approval';
     }
 
     const report = analyzeChineseAiFlavor(
@@ -335,7 +436,7 @@ export class ChapterOrchestrator {
     );
     record.updatedAt = new Date().toISOString();
 
-    if (params.draftKind === 'humanized' && project.workflow.approvalMode === 'auto-continuous') {
+    if (!wasPaused && params.draftKind === 'humanized' && project.workflow.approvalMode === 'auto-continuous') {
       await this.commitChapterInternal(bundle, params.chapterNo, params.wakeNextCat ?? true);
       return {
         record: this.mustLoad(params.projectId).project.chapters[String(params.chapterNo)]!,
@@ -346,7 +447,7 @@ export class ChapterOrchestrator {
 
     this.store.saveBundle(project);
 
-    if (params.wakeNextCat && params.draftKind === 'raw' && project.threadId && this.threadCoordinator) {
+    if (!wasPaused && params.wakeNextCat && params.draftKind === 'raw' && project.threadId && this.threadCoordinator) {
       await this.threadCoordinator.dispatchToCat({
         threadId: project.threadId,
         targetCatId: project.catRoster.criticCatId,
@@ -592,7 +693,13 @@ export class ChapterOrchestrator {
     return this.mustLoad(projectId);
   }
 
-  async toggleAutoContinuous(projectId: string, enabled: boolean, maxChapters?: number): Promise<NovelProject> {
+  async toggleAutoContinuous(
+    projectId: string,
+    enabled: boolean,
+    maxChapters?: number,
+    startFromChapterNo?: number,
+    resetStartChapterDraft = false,
+  ): Promise<NovelProject> {
     const bundle = this.mustLoad(projectId);
     const { project } = bundle;
     project.workflow.approvalMode = enabled ? 'auto-continuous' : 'chapter-gate';
@@ -603,12 +710,25 @@ export class ChapterOrchestrator {
     this.store.saveBundle(project);
 
     if (enabled) {
-      const nextOutline = project.chapterOutlines.find((o) => {
-        const st = project.chapters[String(o.chapterNo)]?.stage;
-        return st !== 'committed';
-      });
+      const nextOutline =
+        startFromChapterNo !== undefined
+          ? project.chapterOutlines.find((o) => o.chapterNo === startFromChapterNo)
+          : project.chapterOutlines.find((o) => {
+              const st = project.chapters[String(o.chapterNo)]?.stage;
+              return st !== 'committed';
+            });
+      if (startFromChapterNo !== undefined && !nextOutline) {
+        throw new Error(`Chapter ${startFromChapterNo} outline not found`);
+      }
       if (nextOutline) {
-        await this.prepareAndStartChapter(projectId, nextOutline.chapterNo, { wakeCatsInThread: true });
+        const existingStage = project.chapters[String(nextOutline.chapterNo)]?.stage;
+        if (existingStage === 'committed') {
+          throw new Error(`第 ${nextOutline.chapterNo} 章已定稿入账；请从后续未定稿章节开始连写，或先回滚快照。`);
+        }
+        await this.prepareAndStartChapter(projectId, nextOutline.chapterNo, {
+          wakeCatsInThread: true,
+          resetExistingDraft: resetStartChapterDraft,
+        });
       }
     }
     return this.mustLoad(projectId).project;
@@ -630,7 +750,11 @@ export class ChapterOrchestrator {
 
     record.stage = 'committed';
     record.updatedAt = new Date().toISOString();
-    project.currentChapterNo = chapterNo + 1;
+
+    const nextUncommittedOutline = project.chapterOutlines.find(
+      (o) => o.chapterNo > chapterNo && project.chapters[String(o.chapterNo)]?.stage !== 'committed',
+    );
+    project.currentChapterNo = nextUncommittedOutline ? nextUncommittedOutline.chapterNo : chapterNo + 1;
 
     if (project.workflow.approvalMode === 'auto-continuous' && project.workflow.autoRemainingChapters > 0) {
       project.workflow.autoRemainingChapters = Math.max(0, project.workflow.autoRemainingChapters - 1);
@@ -639,17 +763,14 @@ export class ChapterOrchestrator {
     this.store.saveBundle(project, nextGraph, nextMechanics);
     this.store.saveCanonSnapshot(project.id, chapterNo, nextGraph);
 
-    // Auto-advance to Chapter N+1 in auto-continuous mode if remaining budget > 0 and outline exists!
+    // Auto-advance to the next uncommitted chapter outline in auto-continuous mode if remaining budget > 0!
     if (
       allowAutoAdvance &&
       project.workflow.approvalMode === 'auto-continuous' &&
-      project.workflow.autoRemainingChapters > 0
+      project.workflow.autoRemainingChapters > 0 &&
+      nextUncommittedOutline
     ) {
-      const nextNo = chapterNo + 1;
-      const hasNextOutline = project.chapterOutlines.some((o) => o.chapterNo === nextNo);
-      if (hasNextOutline) {
-        await this.prepareAndStartChapter(project.id, nextNo, { wakeCatsInThread: true });
-      }
+      await this.prepareAndStartChapter(project.id, nextUncommittedOutline.chapterNo, { wakeCatsInThread: true });
     }
   }
 

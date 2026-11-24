@@ -193,11 +193,32 @@ export const novelStudioApi = {
       worldBlueprintMarkdown?: string;
       storyArcs?: StoryArc[];
       chapterOutlines?: ChapterOutline[];
+      replaceAllChapterOutlines?: boolean;
     },
   ) =>
     jsonRequest<{ project: NovelProject }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/outlines`, {
       method: 'PUT',
       body: JSON.stringify(input),
+    }),
+
+  deleteChapterOutline: (projectId: string, chapterNo: number) =>
+    jsonRequest<{ project: NovelProject }>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/outlines/${chapterNo}`,
+      {
+        method: 'DELETE',
+      },
+    ),
+
+  pauseProject: (projectId: string) =>
+    jsonRequest<{
+      project: NovelProject;
+      pausedChapterNos: number[];
+      cancelledCats: string[];
+      withdrawnQueueCount: number;
+      bundle: NovelProjectBundleDto;
+    }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/pause`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     }),
 
   triggerAiPlan: (projectId: string, directionPrompt: string, targetChapterCount: number) =>
@@ -224,12 +245,12 @@ export const novelStudioApi = {
       },
     ),
 
-  startChapter: (projectId: string, chapterNo: number, wakeCatsInThread = true) =>
+  startChapter: (projectId: string, chapterNo: number, wakeCatsInThread = true, resetExistingDraft = false) =>
     jsonRequest<{ bundle: NovelProjectBundleDto }>(
       `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/start`,
       {
         method: 'POST',
-        body: JSON.stringify({ wakeCatsInThread }),
+        body: JSON.stringify({ wakeCatsInThread, resetExistingDraft }),
       },
     ),
 
@@ -261,12 +282,18 @@ export const novelStudioApi = {
       body: JSON.stringify({ targetChapterNo }),
     }),
 
-  toggleAutoContinuous: (projectId: string, enabled: boolean, maxChapters?: number) =>
+  toggleAutoContinuous: (
+    projectId: string,
+    enabled: boolean,
+    maxChapters?: number,
+    startFromChapterNo?: number,
+    resetStartChapterDraft = false,
+  ) =>
     jsonRequest<{ project: NovelProject }>(
       `/api/novel-studio/projects/${encodeURIComponent(projectId)}/auto-continuous`,
       {
         method: 'POST',
-        body: JSON.stringify({ enabled, maxChapters }),
+        body: JSON.stringify({ enabled, maxChapters, startFromChapterNo, resetStartChapterDraft }),
       },
     ),
 
