@@ -687,6 +687,7 @@ import {
   preflightRace,
 } from './invoke-helpers.js';
 import { MEMBER_TIMEOUT_REASON, MemberOutputTimeout, type MemberTimeoutEvent } from './member-output-timeout.js';
+import { noteMemberQuotaExhausted } from './member-quota-cooldown.js';
 import type { TaskProgressItem, TaskProgressStatus, TaskProgressStore } from './TaskProgressStore.js';
 import { assertToolExecutionPolicySupported, normalizeToolExecutionPolicy } from './tool-execution-policy.js';
 import { findWindowsLiveOwner } from './WindowsJobStopRecovery.js';
@@ -5658,6 +5659,9 @@ async function* invokePreparedSingleCat(deps: InvocationDeps, params: Invocation
               : {}),
             ...(out.errorCode ? { providerErrorCode: out.errorCode } : {}),
           });
+        // Remember a provider quota failure for the rest of its window so the next dispatch can
+        // refuse with the reset time instead of spawning the CLI into the same wall again.
+        if (out.metadata?.cliDiagnostics?.reasonCode === 'quota_exceeded') noteMemberQuotaExhausted(catId);
         if (routingDispatchFailureClass !== undefined) routingFailureObservedAt ??= messageObservedAt;
         if (out.type === 'error') {
           hadError = true;

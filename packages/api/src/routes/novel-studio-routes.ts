@@ -19,6 +19,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
+import { describeMemberQuotaBlock } from '../domains/cats/services/agents/invocation/member-quota-cooldown.js';
 import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
 import type { AnyMessageStore } from '../domains/cats/services/stores/factories/MessageStoreFactory.js';
 import type { IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
@@ -188,6 +189,24 @@ const DEFAULT_EDITORIAL_CATS = [
 export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = async (app, opts) => {
   const { runtime } = opts;
   const fallbackUser = opts.defaultOwnerUserId ?? 'owner';
+
+  /**
+   * Refuse a dispatch whose member is inside a provider quota window (Kimi's rolling 5 hours, for
+   * example) instead of spawning the CLI into `quota_exceeded` again. Returns true when the reply
+   * was already sent.
+   */
+  const rejectQuotaBlockedMember = (reply: FastifyReply, catId: string | undefined): boolean => {
+    if (!catId) return false;
+    const block = describeMemberQuotaBlock(catId);
+    if (!block) return false;
+    reply.status(409).send({
+      error: block.message,
+      code: 'member_quota_exhausted',
+      catId,
+      blockedUntil: block.blockedUntil,
+    });
+    return true;
+  };
 
   app.addHook('preHandler', async (request, reply) => {
     const uid = resolveOperatorId(request, fallbackUser);
@@ -574,6 +593,7 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
       }
       const userId = resolveOperatorId(request, fallbackUser) ?? fallbackUser;
       const architectCat = bundle.project.catRoster.architectCatId;
+      if (rejectQuotaBlockedMember(reply, architectCat)) return;
       const plotSkills = bundle.project.dimensionBindings.find((b) => b.dimension === 'plot_arc')?.skillSlugs ?? [];
 
       const prompt =
@@ -652,6 +672,8 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
           resetExistingDraft: z.boolean().default(false),
         })
         .parse(request.body ?? {});
+      const bundleBeforeStart = runtime.projectStore.loadBundle(projectId);
+      if (rejectQuotaBlockedMember(reply, bundleBeforeStart?.project.catRoster.writerCatId)) return;
       const packet = await runtime.orchestrator.prepareAndStartChapter(projectId, chapterNo, {
         wakeCatsInThread: body.wakeCatsInThread,
         resetExistingDraft: body.resetExistingDraft,
@@ -748,6 +770,8 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
           resetStartChapterDraft: z.boolean().default(false),
         })
         .parse(request.body);
+      const bundleBeforeAuto = runtime.projectStore.loadBundle(projectId);
+      if (rejectQuotaBlockedMember(reply, bundleBeforeAuto?.project.catRoster.writerCatId)) return;
       const project = await runtime.orchestrator.toggleAutoContinuous(
         projectId,
         body.enabled,
