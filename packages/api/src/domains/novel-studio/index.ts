@@ -9,6 +9,7 @@ import { BookToSkillCompiler } from './skill-compiler/book-to-skill-compiler.js'
 
 export * from './canon/invariant-checker.js';
 export * from './coordinator/chapter-orchestrator.js';
+export * from './coordinator/copilot-context-builder.js';
 export * from './coordinator/novel-project-store.js';
 export * from './corpus/novel-embedding-provider.js';
 export * from './corpus/novel-ingestor.js';

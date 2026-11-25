@@ -137,10 +137,83 @@ export function buildPreChapterConstraints(params: {
 }
 
 /**
+ * Build continuity & mechanics constraints directly from a chapter-start snapshot
+ * (used by Human-in-the-Loop Chapter Co-Pilot without requiring a pre-generated ChapterOutline).
+ */
+export function buildSnapshotContinuityConstraints(params: {
+  chapterNo: number;
+  graph: NarrativeGraph;
+  mechanics: MechanicsLedger;
+}): string {
+  const { chapterNo, graph, mechanics } = params;
+  const lines: string[] = [`## 第 ${chapterNo} 章承上连续性硬约束 (SNAPSHOT #${chapterNo - 1} CANON)`, ''];
+
+  if (graph.characters.length > 0) {
+    lines.push('### 1. 已建档角色状态与知情权边界');
+    const secretFacts = graph.facts.filter((f) => f.isSecret);
+    for (const ch of graph.characters) {
+      const statusWarn =
+        ch.status === 'dead' || ch.status === 'sealed' ? ` ⛔【硬禁令：已处于 ${ch.status} 状态，严禁活人出场】` : '';
+      const injuries = ch.injuriesOrDebuffs.length > 0 ? ` | 伤势/限制：${ch.injuriesOrDebuffs.join('、')}` : '';
+      const inv = ch.inventory.length > 0 ? ` | 持有物：${ch.inventory.join('、')}` : '';
+      lines.push(
+        `- **${ch.name}** (\`${ch.id}\`)：状态=\`${ch.status}\` | 位置=\`${ch.locationId}\` | 实力=\`${ch.powerTier || '未标'}\`${injuries}${inv}${statusWarn}`,
+      );
+      const unknownSecrets = secretFacts
+        .filter((sf) => !ch.knownFactIds.includes(sf.id))
+        .map((sf) => `「${sf.statement}」`);
+      if (unknownSecrets.length > 0 && ch.status !== 'dead') {
+        lines.push(`  - 防越界剧透：「${ch.name}」尚不知晓：${unknownSecrets.slice(0, 4).join('；')}`);
+      }
+    }
+    lines.push('');
+  }
+
+  if (graph.locations.length > 0) {
+    lines.push('### 2. 已登场地点状态');
+    for (const loc of graph.locations.slice(-12)) {
+      lines.push(
+        `- **${loc.name}** (\`${loc.id}\`)：状态=\`${loc.status}\`${loc.description ? ` — ${loc.description}` : ''}`,
+      );
+    }
+    lines.push('');
+  }
+
+  const openClues = graph.foreshadowings.filter((f) => f.status === 'planted' || f.status === 'progressed');
+  if (openClues.length > 0) {
+    lines.push('### 3. 当前未回收伏笔线索');
+    for (const clue of openClues.slice(0, 8)) {
+      lines.push(`- [第${clue.plantedChapter}章 · \`${clue.id}\`] ${clue.clue}`);
+    }
+    lines.push('');
+  }
+
+  if (mechanics.enabled) {
+    lines.push(`### 4. 数值/机制账本快照（${mechanics.systemName}）`);
+    for (const rule of mechanics.hardRules) {
+      lines.push(`- [铁律] ${rule}`);
+    }
+    for (const ent of mechanics.entities) {
+      const statPairs = Object.entries(ent.stats)
+        .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('/') : v}`)
+        .join(', ');
+      lines.push(`- **${ent.entityName}**：${statPairs || '暂无数值'}`);
+    }
+    lines.push('');
+  }
+
+  if (lines.length <= 2) {
+    lines.push('当前尚无历史锁定设定，本章新出场的角色、地点与关键设定将在定稿后自动沉淀入库。');
+  }
+
+  return lines.join('\n').trim();
+}
+
+/**
  * Post-draft deterministic continuity & numerical math verification.
  */
 export function verifyDraftContinuity(params: {
-  outline: ChapterOutline;
+  outline?: ChapterOutline;
   draftText: string;
   graph: NarrativeGraph;
   mechanics: MechanicsLedger;
@@ -274,6 +347,12 @@ export function applyCommittedChapterDelta(params: {
     for (const newCh of params.delta.newCharacters) {
       if (!nextGraph.characters.some((c) => c.id === newCh.id)) {
         nextGraph.characters.push({ ...newCh, lastUpdatedChapter: params.chapterNo });
+      }
+    }
+
+    for (const newLoc of params.delta.newLocations ?? []) {
+      if (!nextGraph.locations.some((l) => l.id === newLoc.id)) {
+        nextGraph.locations.push({ ...newLoc, lastUpdatedChapter: params.chapterNo });
       }
     }
 

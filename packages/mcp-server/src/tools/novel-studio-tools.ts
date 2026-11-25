@@ -1,6 +1,8 @@
 import {
+  chapterDirectionOptionSchema,
   chapterOutlineSchema,
   chapterStateDeltaSchema,
+  distilledChapterSummarySchema,
   distilledCraftSkillSchema,
   invariantViolationSchema,
   novelCraftDimensionSchema,
@@ -132,14 +134,61 @@ export function handleNovelPrecheckChapter(input: z.infer<z.ZodObject<typeof nov
   return callbackPost('/api/callbacks/novel-studio/precheck-chapter', input);
 }
 
+export const novelSubmitChapterDirectionsInputSchema = {
+  projectId: z.string().min(1).max(80).describe('Target novel project ID.'),
+  chapterNo: z.number().int().min(1).describe('Target chapter number being ideated.'),
+  options: z
+    .array(chapterDirectionOptionSchema)
+    .length(5)
+    .describe(
+      'Exactly 5 distinct plot progression options & guiding questions tailored to previous chapters, canon snapshot, and reference style.',
+    ),
+};
+
+export function handleNovelSubmitChapterDirections(
+  input: z.infer<z.ZodObject<typeof novelSubmitChapterDirectionsInputSchema>>,
+) {
+  return callbackPost('/api/callbacks/novel-studio/submit-directions', input);
+}
+
+export const novelSubmitChapterSummaryInputSchema = {
+  projectId: z.string().min(1).max(80).describe('Target novel project ID.'),
+  chapterNo: z.number().int().min(1).describe('Finalized chapter number being reverse-summarized.'),
+  summary: distilledChapterSummarySchema
+    .omit({ chapterNo: true, wordCount: true, summarizedAt: true })
+    .describe(
+      'Faithful reverse-distilled chapter summary outline (title, oneLineSummary, keyEvents, characterChanges, newlyIntroducedSettings, openingAnchor, endingAnchor).',
+    ),
+  stateDelta: chapterStateDeltaSchema
+    .optional()
+    .describe('Structured character/location/inventory/foreshadowing/mechanics changes verified from finalized text.'),
+  worldbuildingAdditions: z
+    .array(z.string().min(1).max(400))
+    .max(30)
+    .optional()
+    .describe('Newly introduced worldbuilding lore, rules, factions, or proper nouns extracted from finalized text.'),
+  rollingSynopsisMarkdown: z
+    .string()
+    .max(100_000)
+    .optional()
+    .describe('Optional updated cumulative rolling synopsis markdown across completed chapters.'),
+};
+
+export function handleNovelSubmitChapterSummary(
+  input: z.infer<z.ZodObject<typeof novelSubmitChapterSummaryInputSchema>>,
+) {
+  return callbackPost('/api/callbacks/novel-studio/submit-summary', input);
+}
+
 export const novelSubmitChapterDraftInputSchema = {
   projectId: z.string().min(1).max(80).describe('Target novel project ID.'),
   chapterNo: z.number().int().min(1).describe('Chapter number.'),
+  title: z.string().max(120).optional().describe('Chapter title (recommended in copilot mode).'),
   draftKind: z
-    .enum(['raw', 'humanized'])
-    .default('raw')
+    .enum(['raw', 'humanized', 'copilot'])
+    .default('copilot')
     .describe(
-      'raw for initial/rewritten manuscript awaiting cross-cat review; humanized for post-review de-AI-ified prose.',
+      'copilot for human-guided chapter co-pilot drafts; raw for legacy cross-cat review; humanized for post-review de-AI-ified prose.',
     ),
   content: z.string().min(100).max(60_000).describe('Full chapter manuscript text in Chinese.'),
   proposedStateDelta: chapterStateDeltaSchema
@@ -329,6 +378,40 @@ export const novelStudioTools = [
     handler: handleNovelCommitChapterCanon,
     governance: {
       implementationExport: 'handleNovelCommitChapterCanon',
+      action: 'update',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full'],
+      standaloneReason: novelAdmissionReason,
+    },
+  }),
+  defineTool({
+    name: 'novel_submit_chapter_directions',
+    description:
+      'Submit 5 distinct plot progression directions and guiding questions for the author to choose from before drafting the next chapter. ' +
+      'Use when the Co-Pilot Cat ideates pre-chapter directions based on previous chapters, Snapshot #(K-1) canon, downstream bridge constraints, and reference beats. ' +
+      'Not for submitting full chapter prose (use novel_submit_chapter_draft) or overwriting the author master outline. ' +
+      'Output: persisted 5-option direction deck on ChapterStateRecord with stage transitioned to awaiting_choice.',
+    inputSchema: novelSubmitChapterDirectionsInputSchema,
+    handler: handleNovelSubmitChapterDirections,
+    governance: {
+      implementationExport: 'handleNovelSubmitChapterDirections',
+      action: 'update',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full'],
+      standaloneReason: novelAdmissionReason,
+    },
+  }),
+  defineTool({
+    name: 'novel_submit_chapter_summary',
+    description:
+      'Submit a reverse-distilled chapter summary outline, rolling synopsis update, worldbuilding additions, and verified canon state delta from a finalized chapter. ' +
+      'Use when a chapter manuscript is finalized and needs bottom-up summary outline and living canon extraction. ' +
+      'Not for speculative pre-chapter planning or mutating the human author master outline. ' +
+      'Output: updated DistilledChapterSummary, NarrativeGraph snapshot, worldbuilding notes, and downstream continuity bridge check.',
+    inputSchema: novelSubmitChapterSummaryInputSchema,
+    handler: handleNovelSubmitChapterSummary,
+    governance: {
+      implementationExport: 'handleNovelSubmitChapterSummary',
       action: 'update',
       risk: { level: 'write', openWorld: false },
       runtimeProfiles: ['full'],

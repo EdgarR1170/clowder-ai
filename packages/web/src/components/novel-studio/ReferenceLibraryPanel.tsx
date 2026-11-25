@@ -1,46 +1,48 @@
 'use client';
 
 import {
-  type DistilledCraftSkill,
   NOVEL_CRAFT_DIMENSION_LABELS,
   NOVEL_CRAFT_DIMENSIONS,
   type NovelCraftDimension,
+  type NovelProject,
   type ReferenceBookSummary,
   type RetrievedBeatPassage,
 } from '@cat-cafe/shared';
-import { type FC, useState } from 'react';
-import { BookIcon, SparklesIcon } from './NovelIcons';
-import { type CatSummaryItem, fileToBase64, type NovelEmbedderConfigDto, novelStudioApi } from './novel-studio-api';
+import { type FC, useEffect, useState } from 'react';
+import { BookIcon } from './NovelIcons';
+import { fileToBase64, type NovelEmbedderConfigDto, novelStudioApi } from './novel-studio-api';
 
 interface ReferenceLibraryPanelProps {
   books: ReferenceBookSummary[];
-  skills: DistilledCraftSkill[];
-  cats: CatSummaryItem[];
+  activeProject?: NovelProject;
   embeddingConfig: NovelEmbedderConfigDto;
-  activeProjectThreadId?: string;
   onRefresh: () => Promise<void>;
 }
 
+const STYLE_PRESETS = [
+  '沉稳具象·强代入感',
+  '冷峻克制·高张力快节奏',
+  '诡谲悬疑·细节伏笔流',
+  '轻快机锋·强人物对话感',
+  '古典雅致·画面意境流',
+] as const;
+
 export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
   books,
-  cats,
+  activeProject,
   embeddingConfig,
-  activeProjectThreadId,
   onRefresh,
 }) => {
   const [uploading, setUploading] = useState(false);
   const [titleInput, setTitleInput] = useState('');
   const [authorInput, setAuthorInput] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [distillBookId, setDistillBookId] = useState<string>('');
-  const [distillDim, setDistillDim] = useState<NovelCraftDimension>('battle_action');
-  const [distillFocus, setDistillFocus] = useState('');
-  const [distillCatId, setDistillCatId] = useState<string>('');
-  const [distilling, setDistilling] = useState(false);
+
+  const [stylePreset, setStylePreset] = useState(activeProject?.styleConfig.stylePreset ?? STYLE_PRESETS[0]);
+  const [customGuidelines, setCustomGuidelines] = useState(activeProject?.styleConfig.customStyleGuidelines ?? '');
 
   const [ragQuery, setRagQuery] = useState('');
-  const [ragDim, setRagDim] = useState<NovelCraftDimension>('battle_action');
-  const [ragMode, setRagMode] = useState<'structural_beats' | 'raw_excerpt'>('structural_beats');
+  const [ragDim, setRagDim] = useState<NovelCraftDimension>('plot_arc');
   const [ragResults, setRagResults] = useState<RetrievedBeatPassage[]>([]);
   const [searching, setSearching] = useState(false);
 
@@ -50,6 +52,12 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
   const [embedModel, setEmbedModel] = useState(embeddingConfig.model ?? 'BAAI/bge-m3');
   const [embedKey, setEmbedKey] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeProject) return;
+    setStylePreset(activeProject.styleConfig.stylePreset || STYLE_PRESETS[0]);
+    setCustomGuidelines(activeProject.styleConfig.customStyleGuidelines || '');
+  }, [activeProject]);
 
   const handleUpload = async () => {
     if (!selectedFile) return;
@@ -69,7 +77,7 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
       setAuthorInput('');
       setSelectedFile(null);
       await onRefresh();
-      setNotice(`《${inferredTitle}》已完成分章、6维密度扫描与 sqlite-vec 向量索引。`);
+      setNotice(`参照小说《${inferredTitle}》已提取句法文风画像与脱敏节拍向量索引。`);
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
     } finally {
@@ -77,27 +85,38 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
     }
   };
 
-  const handleDistill = async (bookId: string) => {
-    setDistilling(true);
-    setNotice(null);
+  const handleToggleBindBook = async (bookId: string) => {
+    if (!activeProject) return;
+    const current = activeProject.styleConfig.referenceBookIds;
+    const nextIds = current.includes(bookId) ? current.filter((id) => id !== bookId) : [...current, bookId].slice(-3);
     try {
-      const res = await novelStudioApi.distillSkillFromBook(bookId, {
-        dimension: distillDim,
-        customFocus: distillFocus.trim() || undefined,
-        deepRefineThreadId: distillCatId && activeProjectThreadId ? activeProjectThreadId : undefined,
-        dissectorCatId: distillCatId || undefined,
+      await novelStudioApi.updateMasterOutlineAndStyle(activeProject.id, {
+        styleConfig: {
+          ...activeProject.styleConfig,
+          referenceBookIds: nextIds,
+        },
       });
       await onRefresh();
-      setDistillBookId('');
-      setDistillFocus('');
-      setNotice(
-        `已生成并挂载技法包「${res.skill.slug}」` +
-          (distillCatId && activeProjectThreadId ? `，并已唤醒 @${distillCatId} 在编辑部群聊执行深度精炼。` : '。'),
-      );
+      setNotice('已更新当前小说的参照风格书单（仅用于下一章 5 方向启发与单章行文节奏模拟）。');
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDistilling(false);
+    }
+  };
+
+  const handleSaveStyleGuidelines = async () => {
+    if (!activeProject) return;
+    try {
+      await novelStudioApi.updateMasterOutlineAndStyle(activeProject.id, {
+        styleConfig: {
+          ...activeProject.styleConfig,
+          stylePreset,
+          customStyleGuidelines: customGuidelines,
+        },
+      });
+      await onRefresh();
+      setNotice('已保存单章生成文风配置。');
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -107,9 +126,12 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
     try {
       const res = await novelStudioApi.searchPassages({
         query: ragQuery.trim(),
+        bookIds: activeProject?.styleConfig.referenceBookIds.length
+          ? activeProject.styleConfig.referenceBookIds
+          : undefined,
         dimension: ragDim,
-        mode: ragMode,
-        topK: 4,
+        mode: 'structural_beats',
+        topK: 3,
       });
       setRagResults(res.passages);
     } catch (err) {
@@ -129,7 +151,7 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
       });
       setShowEmbedSettings(false);
       await onRefresh();
-      setNotice('向量索引引擎配置已更新。');
+      setNotice('向量索引配置已更新。');
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
     }
@@ -143,76 +165,112 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
         </div>
       )}
 
-      {/* Upload & Embedding Engine Header */}
+      {/* Active Project Style Guidelines */}
+      {activeProject && (
+        <section className="rounded-xl border border-cafe bg-cafe-surface p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-cafe">《{activeProject.title}》单章行文风格设定</h3>
+              <p className="text-xs text-cafe-muted">
+                严格边界：参照风格只作用于「下一章前的 5
+                方向结构启发」与「下一章正文句法节奏模拟」，绝不干预全书大纲走向。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleSaveStyleGuidelines()}
+              className="rounded-md bg-cafe-accent px-3 py-1.5 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover"
+            >
+              保存文风配置
+            </button>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-xs text-cafe-muted">基础文风预设</label>
+              <select
+                value={stylePreset}
+                onChange={(e) => setStylePreset(e.target.value)}
+                className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+              >
+                {STYLE_PRESETS.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="sm:col-span-2">
+              <label className="mb-1 block text-xs text-cafe-muted">自定义文风与叙事习惯说明（选填）</label>
+              <input
+                type="text"
+                value={customGuidelines}
+                onChange={(e) => setCustomGuidelines(e.target.value)}
+                placeholder="例如：第三人称限知视角，少用心理独白铺陈，多通过细微肢体动作和短促对话体现压迫感"
+                className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+              />
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Upload Reference Book */}
       <section className="rounded-xl border border-cafe bg-cafe-surface p-4 shadow-sm">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <BookIcon className="h-4 w-4 text-cafe-accent" />
-            <h3 className="text-sm font-semibold text-cafe">导入参考小说（拆书源 A / B / C / D）</h3>
+            <h3 className="text-sm font-semibold text-cafe">上传参照小说（提取句法节奏与脱敏冲突节拍）</h3>
           </div>
           <button
             type="button"
             onClick={() => setShowEmbedSettings((v) => !v)}
             className="rounded-md border border-cafe px-2.5 py-1 text-xs text-cafe-secondary hover:bg-cafe-surface-sunken"
           >
-            向量源: {embeddingConfig.provider}
+            向量通道: {embeddingConfig.provider}
           </button>
         </div>
 
         {showEmbedSettings && (
           <div className="mb-4 grid grid-cols-1 gap-2.5 rounded-lg border border-cafe-subtle bg-cafe-surface-sunken p-3 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-xs text-cafe-muted">Embedding 通道</label>
-              <select
-                value={embedProvider}
-                onChange={(e) => setEmbedProvider(e.target.value as NovelEmbedderConfigDto['provider'])}
+            <select
+              value={embedProvider}
+              onChange={(e) => setEmbedProvider(e.target.value as NovelEmbedderConfigDto['provider'])}
+              className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+            >
+              <option value="auto">自动优选 (API / Sidecar / CJK哈希向量)</option>
+              <option value="openai-compatible">OpenAI 兼容接口 (Ollama / SiliconFlow / BGE)</option>
+              <option value="clowder-local">Clowder 本地向量 (768d)</option>
+              <option value="local-hash-vec">纯本地离线 CJK N-gram 向量 (384d)</option>
+              <option value="fts-only">仅 FTS5 BM25 索引</option>
+            </select>
+            <input
+              type="text"
+              value={embedModel}
+              onChange={(e) => setEmbedModel(e.target.value)}
+              placeholder="模型名称（如 BAAI/bge-m3）"
+              className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+            />
+            <input
+              type="text"
+              value={embedUrl}
+              onChange={(e) => setEmbedUrl(e.target.value)}
+              placeholder="API Base URL（留空用本地）"
+              className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+            />
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={embedKey}
+                onChange={(e) => setEmbedKey(e.target.value)}
+                placeholder={embeddingConfig.apiKey ?? 'API Key（无则留空）'}
                 className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+              />
+              <button
+                type="button"
+                onClick={() => void handleSaveEmbedConfig()}
+                className="shrink-0 rounded-md bg-cafe-accent px-3 py-1.5 text-xs font-medium text-cafe-white"
               >
-                <option value="auto">自动优选 (API / 本地Sidecar / CJK哈希向量)</option>
-                <option value="openai-compatible">OpenAI 兼容接口 (Ollama / SiliconFlow / BGE)</option>
-                <option value="clowder-local">Clowder 内置 Python Sidecar (768d)</option>
-                <option value="local-hash-vec">纯本地离线 CJK N-gram 向量 (384d)</option>
-                <option value="fts-only">仅 FTS5 BM25 词法索引</option>
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-cafe-muted">模型名称</label>
-              <input
-                type="text"
-                value={embedModel}
-                onChange={(e) => setEmbedModel(e.target.value)}
-                placeholder="BAAI/bge-m3 或 nomic-embed-text"
-                className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-cafe-muted">API Base URL (如 http://127.0.0.1:11434/v1)</label>
-              <input
-                type="text"
-                value={embedUrl}
-                onChange={(e) => setEmbedUrl(e.target.value)}
-                placeholder="留空则使用本地向量通道"
-                className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-cafe-muted">API Key (可选)</label>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  value={embedKey}
-                  onChange={(e) => setEmbedKey(e.target.value)}
-                  placeholder={embeddingConfig.apiKey ?? '无密钥可留空'}
-                  className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
-                />
-                <button
-                  type="button"
-                  onClick={handleSaveEmbedConfig}
-                  className="shrink-0 rounded-md bg-cafe-accent px-3 py-1.5 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover"
-                >
-                  保存
-                </button>
-              </div>
+                保存
+              </button>
             </div>
           </div>
         )}
@@ -234,7 +292,7 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
             type="text"
             value={titleInput}
             onChange={(e) => setTitleInput(e.target.value)}
-            placeholder="参考书名（如：大主宰 / 诡秘之主）"
+            placeholder="参照小说书名"
             className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
           />
           <input
@@ -247,165 +305,90 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
           <button
             type="button"
             disabled={!selectedFile || uploading}
-            onClick={handleUpload}
+            onClick={() => void handleUpload()}
             className="rounded-md bg-cafe-accent px-3 py-1.5 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover disabled:opacity-50"
           >
-            {uploading ? '分章与向量索引中...' : '拆书入库 + 建向量'}
+            {uploading ? '提取文风中...' : '导入并提取文风'}
           </button>
         </div>
-        <p className="mt-2 text-xs text-cafe-muted">
-          支持 UTF-8 / GB18030 中文长篇 .txt、.epub 与 .md，自动完成章回切分、6 维技法密度扫描与 sqlite-vec 混合索引。
-        </p>
       </section>
 
-      {/* Ingested Reference Books List */}
+      {/* Reference Book Cards */}
       <section className="space-y-3">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-cafe-muted">
-          已入库参考小说 ({books.length})
+          已导入参照小说 ({books.length})
         </h3>
         {books.length === 0 ? (
           <div className="rounded-xl border border-dashed border-cafe bg-cafe-surface p-6 text-center text-xs text-cafe-muted">
-            尚未导入参考小说。先上传 A/B/C/D 参考书，即可一键抽离各维度 Book-to-Skill 技法包。
+            尚未导入参照小说。上传你喜欢文风的 .txt / .epub / .md 小说，即可一键设为当前作品的下一章行文参照。
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-3">
-            {books.map((book) => (
-              <div key={book.id} className="rounded-xl border border-cafe bg-cafe-surface p-4 shadow-sm">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
+            {books.map((book) => {
+              const isBound = Boolean(activeProject?.styleConfig.referenceBookIds.includes(book.id));
+              return (
+                <div key={book.id} className="rounded-xl border border-cafe bg-cafe-surface p-4 shadow-sm">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-cafe">《{book.title}》</span>
+                        {book.author && <span className="text-xs text-cafe-muted">{book.author}</span>}
+                        <span className="rounded-full bg-cafe-surface-sunken px-2 py-0.5 text-xs text-cafe-secondary">
+                          {book.chapterCount} 章 · {(book.totalChars / 10000).toFixed(1)} 万字
+                        </span>
+                      </div>
+                      {book.rawStyleStats && (
+                        <p className="mt-1 text-xs text-cafe-muted">
+                          平均句长 {book.rawStyleStats.avgSentenceLengthChars} 字 · 对话占比{' '}
+                          {Math.round(book.rawStyleStats.dialogueRatio * 100)}% · 叙事视角{' '}
+                          {book.rawStyleStats.dominantPov}
+                        </p>
+                      )}
+                    </div>
+
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-cafe">《{book.title}》</span>
-                      {book.author && <span className="text-xs text-cafe-muted">{book.author}</span>}
-                      <span className="rounded-full bg-cafe-surface-sunken px-2 py-0.5 text-xs text-cafe-secondary">
-                        {book.chapterCount} 章 · {(book.totalChars / 10000).toFixed(1)} 万字 · {book.chunkCount} 场景块
-                      </span>
-                      <span className="rounded-full bg-semantic-success-surface px-2 py-0.5 text-xs text-semantic-success">
-                        {book.embedStatus === 'vec_ready' ? `向量就绪 (${book.embeddedChunkCount})` : book.embedStatus}
-                      </span>
-                    </div>
-                    {book.rawStyleStats && (
-                      <p className="mt-1 text-xs text-cafe-muted">
-                        平均句长 {book.rawStyleStats.avgSentenceLengthChars} 字 · 对话占比{' '}
-                        {Math.round(book.rawStyleStats.dialogueRatio * 100)}% · 主视角 {book.rawStyleStats.dominantPov}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setDistillBookId(distillBookId === book.id ? '' : book.id)}
-                      className="inline-flex items-center gap-1 rounded-md bg-cafe-accent px-2.5 py-1 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover"
-                    >
-                      <SparklesIcon className="h-3.5 w-3.5" />
-                      抽离维度技法 Skill
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await novelStudioApi.deleteBook(book.id);
-                        await onRefresh();
-                      }}
-                      className="rounded-md border border-cafe px-2 py-1 text-xs text-cafe-muted hover:text-semantic-critical"
-                    >
-                      移除
-                    </button>
-                  </div>
-                </div>
-
-                {/* 6-Dimension Density Bars */}
-                <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-6">
-                  {NOVEL_CRAFT_DIMENSIONS.map((dim) => {
-                    const score = book.dimensionAverages[dim] ?? 0;
-                    return (
-                      <div key={dim} className="rounded-md bg-cafe-surface-sunken px-2.5 py-1.5">
-                        <div className="flex justify-between text-xs text-cafe-secondary">
-                          <span>{NOVEL_CRAFT_DIMENSION_LABELS[dim].zh.slice(0, 4)}</span>
-                          <span>{Math.round(score * 100)}%</span>
-                        </div>
-                        <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-cafe-surface-canvas">
-                          <div
-                            className="h-full rounded-full bg-cafe-accent"
-                            style={{ width: `${Math.min(100, Math.max(6, Math.round(score * 100)))}%` }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Inline Book-to-Skill Distillation Drawer */}
-                {distillBookId === book.id && (
-                  <div className="mt-3 rounded-lg border border-cafe-subtle bg-cafe-surface-sunken p-3">
-                    <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-                      <div>
-                        <label className="mb-1 block text-xs font-medium text-cafe">选择要从本书抽离的单一维度</label>
-                        <select
-                          value={distillDim}
-                          onChange={(e) => setDistillDim(e.target.value as NovelCraftDimension)}
-                          className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+                      {activeProject && (
+                        <button
+                          type="button"
+                          onClick={() => void handleToggleBindBook(book.id)}
+                          className={`rounded-md px-3 py-1 text-xs font-medium ${
+                            isBound
+                              ? 'bg-semantic-success-surface text-semantic-success'
+                              : 'bg-cafe-accent text-cafe-white hover:bg-cafe-accent-hover'
+                          }`}
                         >
-                          {NOVEL_CRAFT_DIMENSIONS.map((d) => (
-                            <option key={d} value={d}>
-                              {NOVEL_CRAFT_DIMENSION_LABELS[d].zh} — {NOVEL_CRAFT_DIMENSION_LABELS[d].shortDesc}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-xs font-medium text-cafe">定向萃取侧重点（选填）</label>
-                        <input
-                          type="text"
-                          value={distillFocus}
-                          onChange={(e) => setDistillFocus(e.target.value)}
-                          placeholder="例如：重点学习多人混战中的空间换位与悬念断章"
-                          className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
-                        />
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-xs font-medium text-cafe">同步唤醒拆书猫深化（可选）</label>
-                        <div className="flex gap-2">
-                          <select
-                            value={distillCatId}
-                            onChange={(e) => setDistillCatId(e.target.value)}
-                            className="w-full rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
-                          >
-                            <option value="">仅立即编译统计+规则技法包</option>
-                            {cats.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                交由 {c.name} (@{c.id}) 深度精读升华
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            disabled={distilling}
-                            onClick={() => handleDistill(book.id)}
-                            className="shrink-0 rounded-md bg-cafe-accent px-3 py-1.5 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover disabled:opacity-50"
-                          >
-                            {distilling ? '生成中...' : '生成 Skill'}
-                          </button>
-                        </div>
-                      </div>
+                          {isBound ? '已设为当前小说参照风格' : '设为当前小说参照风格'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await novelStudioApi.deleteBook(book.id);
+                          await onRefresh();
+                        }}
+                        className="rounded-md border border-cafe px-2 py-1 text-xs text-cafe-muted hover:text-semantic-critical"
+                      >
+                        移除
+                      </button>
                     </div>
                   </div>
-                )}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
 
-      {/* Hybrid Vector + FTS5 RAG Sandbox */}
+      {/* De-identified Beat Preview Search */}
       <section className="rounded-xl border border-cafe bg-cafe-surface p-4 shadow-sm">
-        <h3 className="mb-2.5 text-sm font-semibold text-cafe">混合向量 RAG 场景节拍试搜（sqlite-vec + FTS5）</h3>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-5">
+        <h3 className="mb-2 text-sm font-semibold text-cafe">脱敏冲突节拍与文风韵律试检索</h3>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
           <input
             type="text"
             value={ragQuery}
             onChange={(e) => setRagQuery(e.target.value)}
-            placeholder="输入场景情境，如：雨夜窄巷以弱胜强突围 / 师徒决裂潜台词试探"
-            className=" rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe sm:col-span-2"
+            placeholder="输入想参考的场景氛围或冲突情境（如：雨夜客栈试探）"
+            className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe sm:col-span-2"
           />
           <select
             value={ragDim}
@@ -414,25 +397,17 @@ export const ReferenceLibraryPanel: FC<ReferenceLibraryPanelProps> = ({
           >
             {NOVEL_CRAFT_DIMENSIONS.map((d) => (
               <option key={d} value={d}>
-                优先维度：{NOVEL_CRAFT_DIMENSION_LABELS[d].zh}
+                {NOVEL_CRAFT_DIMENSION_LABELS[d].zh}
               </option>
             ))}
-          </select>
-          <select
-            value={ragMode}
-            onChange={(e) => setRagMode(e.target.value as 'structural_beats' | 'raw_excerpt')}
-            className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
-          >
-            <option value="structural_beats">脱敏节拍骨架 (防洗稿推荐)</option>
-            <option value="raw_excerpt">原文对照切片</option>
           </select>
           <button
             type="button"
             disabled={searching || !ragQuery.trim()}
-            onClick={handleRagSearch}
+            onClick={() => void handleRagSearch()}
             className="rounded-md bg-cafe-accent px-3 py-1.5 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover disabled:opacity-50"
           >
-            {searching ? '检索中...' : '向量混合召回'}
+            {searching ? '检索中...' : '预览脱敏节拍骨架'}
           </button>
         </div>
 

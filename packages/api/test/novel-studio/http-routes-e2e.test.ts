@@ -370,4 +370,164 @@ describe('Clowder-Novel: REST & MCP Callback HTTP Routes End-to-End', () => {
 
     await app.close();
   });
+
+  it('serves the human-guided Chapter Co-Pilot REST & MCP callback endpoints end-to-end', async () => {
+    const app = Fastify();
+    await app.register(novelStudioRoutes, {
+      runtime,
+      threadStore,
+      invocationQueue,
+      invocationTracker,
+      queueProcessor,
+      defaultOwnerUserId: 'edgar',
+    });
+    await app.register(callbackNovelStudioRoutes, {
+      runtime,
+      registry,
+    });
+    await app.ready();
+
+    // 1. Create Co-Pilot project with initial master outline
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/novel-studio/projects',
+      remoteAddress: '127.0.0.1',
+      payload: {
+        title: '雾海灯塔纪',
+        genre: '蒸汽奇幻',
+        authorMasterOutlineMarkdown: '守塔人陆鸣在雾海第7号灯塔拾获会说话的发条罗盘，逐步揭开海底古都遗迹。',
+        copilotCatId: 'kimi',
+        createEditorialThread: true,
+      },
+    });
+    assert.equal(createRes.statusCode, 200);
+    const projectId = (createRes.json() as { project: { id: string } }).project.id;
+
+    // 2. Request 5 directions via POST /chapters/1/ideate
+    const ideateRes = await app.inject({
+      method: 'POST',
+      url: `/api/novel-studio/projects/${projectId}/chapters/1/ideate`,
+      remoteAddress: '127.0.0.1',
+      payload: { authorSeedHint: '暴风雨夜罗盘漂上灯塔礁石' },
+    });
+    assert.equal(ideateRes.statusCode, 200);
+    assert.equal((ideateRes.json() as { chapterRecord: { stage: string } }).chapterRecord.stage, 'ideating');
+
+    // 3. Co-Pilot Cat ('kimi') reads context (with zero legacy chapterOutlines!) & submits 5 directions via MCP callback
+    const kimiAuth = await registry.create('edgar', 'kimi', 'thread-copilot-http');
+    const ctxRes = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/novel-studio/read-context',
+      headers: {
+        'x-invocation-id': kimiAuth.invocationId,
+        'x-callback-token': kimiAuth.callbackToken,
+      },
+      payload: { projectId, chapterNo: 1 },
+    });
+    assert.equal(ctxRes.statusCode, 200);
+    assert.ok((ctxRes.json() as { copilotContextPacket: unknown }).copilotContextPacket);
+
+    const submitDirsRes = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/novel-studio/submit-directions',
+      headers: {
+        'x-invocation-id': kimiAuth.invocationId,
+        'x-callback-token': kimiAuth.callbackToken,
+      },
+      payload: {
+        projectId,
+        chapterNo: 1,
+        options: [1, 2, 3, 4, 5].map((i) => ({
+          optionId: `dir-${i}`,
+          title: `推进方案 ${i}`,
+          focusType: 'suspense_twist',
+          pitch: `暴风雨夜的第 ${i} 种戏剧切入方式`,
+          openingBeat: '巨浪拍击塔基',
+          endingHook: '罗盘指针逆向飞旋',
+          guidingQuestion: `关于方案 ${i}，你更倾向哪种悬念节奏？`,
+        })),
+      },
+    });
+    assert.equal(submitDirsRes.statusCode, 200);
+    assert.equal((submitDirsRes.json() as { stage: string }).stage, 'awaiting_choice');
+
+    // 4. Author selects dir-1 + custom input -> triggers generate -> Cat submits copilot draft -> Author finalizes -> Cat submits deep summary
+    const genRes = await app.inject({
+      method: 'POST',
+      url: `/api/novel-studio/projects/${projectId}/chapters/1/generate`,
+      remoteAddress: '127.0.0.1',
+      payload: {
+        selectedOptionIds: ['dir-1'],
+        customAuthorInput: '让罗盘内部传出二十年前失踪老塔长的录音。',
+      },
+    });
+    assert.equal(genRes.statusCode, 200);
+    assert.equal((genRes.json() as { chapterRecord: { stage: string } }).chapterRecord.stage, 'drafting');
+
+    const draftRes = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/novel-studio/submit-draft',
+      headers: {
+        'x-invocation-id': kimiAuth.invocationId,
+        'x-callback-token': kimiAuth.callbackToken,
+      },
+      payload: {
+        projectId,
+        chapterNo: 1,
+        title: '第7号灯塔的逆时针罗盘',
+        draftKind: 'copilot',
+        content:
+          '狂暴的咸湿海雾撞在灯塔透镜上。陆鸣撬开搁浅木匣，铜制「发条罗盘」咔哒转动，竟传出失踪二十年的老塔长低哑的警告声！'.repeat(
+            2,
+          ),
+      },
+    });
+    assert.equal(draftRes.statusCode, 200);
+    assert.equal((draftRes.json() as { stage: string }).stage, 'draft_ready');
+
+    const finalizeRes = await app.inject({
+      method: 'POST',
+      url: `/api/novel-studio/projects/${projectId}/chapters/1/finalize`,
+      remoteAddress: '127.0.0.1',
+      payload: { title: '逆时针罗盘', wakeCatForDeepSummary: true },
+    });
+    assert.equal(finalizeRes.statusCode, 200);
+
+    const deepSummaryRes = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/novel-studio/submit-summary',
+      headers: {
+        'x-invocation-id': kimiAuth.invocationId,
+        'x-callback-token': kimiAuth.callbackToken,
+      },
+      payload: {
+        projectId,
+        chapterNo: 1,
+        summary: {
+          title: '逆时针罗盘',
+          oneLineSummary: '陆鸣在暴风雨夜拾获刻有老塔长警告录音的发条罗盘。',
+          keyEvents: ['暴风雨袭击7号灯塔', '拾获搁浅发条罗盘', '触发二十年前警告录音'],
+          characterChanges: ['陆鸣获得关键遗物发条罗盘'],
+          newlyIntroducedSettings: ['第7号灯塔', '逆时针发条罗盘'],
+          openingAnchor: '海雾撞击7号灯塔透镜',
+          endingAnchor: '罗盘传出老塔长警告声',
+        },
+        worldbuildingAdditions: ['雾海航标局规章：第7号灯塔守塔人严禁私自下海打捞漂流物'],
+      },
+    });
+    assert.equal(deepSummaryRes.statusCode, 200);
+
+    const finalBundleRes = await app.inject({
+      method: 'GET',
+      url: `/api/novel-studio/projects/${projectId}`,
+      remoteAddress: '127.0.0.1',
+    });
+    const finalBundle = finalBundleRes.json() as {
+      project: { rollingSynopsisMarkdown: string; accumulatedWorldbuildingMarkdown: string };
+    };
+    assert.match(finalBundle.project.rollingSynopsisMarkdown, /逆时针罗盘/);
+    assert.match(finalBundle.project.accumulatedWorldbuildingMarkdown, /雾海航标局规章/);
+
+    await app.close();
+  });
 });

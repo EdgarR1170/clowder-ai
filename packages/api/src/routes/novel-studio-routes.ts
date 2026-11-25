@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import {
+  backtrackModeSchema,
   catRegistry,
+  chapterDirectionOptionSchema,
   chapterOutlineSchema,
   chapterStateDeltaSchema,
   dimensionSkillBindingSchema,
+  distilledChapterSummarySchema,
   distilledCraftSkillSchema,
   editorialCatRosterBindingSchema,
   invariantViolationSchema,
@@ -14,6 +17,7 @@ import {
   pacing5AxisScoreSchema,
   prose5AxisScoreSchema,
   storyArcSchema,
+  styleReferenceConfigSchema,
 } from '@cat-cafe/shared';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -415,6 +419,9 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
           slug: z.string().optional(),
           genre: z.string().max(80).optional(),
           premise: z.string().max(2000).optional(),
+          authorMasterOutlineMarkdown: z.string().max(100_000).optional(),
+          copilotCatId: z.string().min(1).max(80).optional(),
+          styleConfig: styleReferenceConfigSchema.partial().optional(),
           enableMechanicsLedger: z.boolean().optional(),
           catRoster: editorialCatRosterBindingSchema.partial().optional(),
           createEditorialThread: z.boolean().default(true),
@@ -424,10 +431,10 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
       let threadId: string | undefined;
       if (body.createEditorialThread && opts.threadStore) {
         const userId = resolveOperatorId(request, fallbackUser) ?? fallbackUser;
-        const createdThread = await opts.threadStore.create(userId, `📖《${body.title.trim()}》多猫编辑部`);
+        const createdThread = await opts.threadStore.create(userId, `📖《${body.title.trim()}》小说共创室`);
         const cats = [
+          body.copilotCatId ?? body.catRoster?.writerCatId ?? 'kimi',
           body.catRoster?.chiefEditorCatId ?? 'opus',
-          body.catRoster?.writerCatId ?? 'kimi',
           body.catRoster?.specialistCatId ?? 'gemini',
           body.catRoster?.criticCatId ?? 'codex',
         ];
@@ -680,21 +687,26 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
       if (!bundle) throw new Error(`Project not found: ${projectId}`);
       const rec = bundle.project.chapters[String(chapterNo)];
       if (!rec) throw new Error(`Chapter ${chapterNo} has not been started`);
-      rec.stage = 'rewriting';
+      const isLegacy = bundle.project.chapterOutlines.some((o) => o.chapterNo === chapterNo);
+      rec.stage = isLegacy ? 'rewriting' : 'drafting';
       rec.authorNotes = body.feedback;
       rec.updatedAt = new Date().toISOString();
       runtime.projectStore.saveBundle(bundle.project);
 
       if (bundle.project.threadId && opts.invocationQueue && opts.queueProcessor) {
         const userId = resolveOperatorId(request, fallbackUser) ?? fallbackUser;
-        const writerCat = rec.writerCatId || bundle.project.catRoster.writerCatId;
+        const writerCat =
+          rec.writerCatId || (isLegacy ? bundle.project.catRoster.writerCatId : bundle.project.copilotCatId);
+        const instruction = isLegacy
+          ? `@${writerCat} 作者对第 ${chapterNo} 章提出修改批注：\n> ${body.feedback}\n\n请加载 \`novel-chapter-writer\` 定向精修后重新调用 \`novel_submit_chapter_draft(draftKind="raw")\` 提交审阅。`
+          : `@${writerCat} 作者对《${bundle.project.title}》第 ${chapterNo} 章提出局部修改要求：\n> ${body.feedback}\n\n请加载 \`novel-chapter-copilot\`，先调用 \`novel_read_project_context(projectId="${projectId}", chapterNo=${chapterNo})\` 查看当前草稿与前后衔接约束，按要求精修后调用 \`novel_submit_chapter_draft(projectId="${projectId}", chapterNo=${chapterNo}, draftKind="copilot", title="${rec.title || ''}", content="...")\` 更新草稿！`;
         await opts.invocationQueue.enqueueDurable({
           from: { kind: 'system', service: 'novel-author-feedback' },
           threadId: bundle.project.threadId,
           userId,
           kind: 'private_input',
           ownerAuthProvenance: 'strict',
-          content: `@${writerCat} 作者对第 ${chapterNo} 章提出修改批注：\n> ${body.feedback}\n\n请加载 \`novel-chapter-writer\` 定向精修后重新调用 \`novel_submit_chapter_draft(draftKind="raw")\` 提交审阅。`,
+          content: instruction,
           targetCats: [writerCat as never],
           intent: 'execute',
           autoExecute: true,
@@ -705,6 +717,159 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
       }
 
       return runtime.projectStore.loadBundle(projectId);
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  // ── Human-in-the-Loop Chapter Co-Pilot Routes ────────────────────────────
+  app.put(
+    '/api/novel-studio/projects/:projectId/master-outline',
+    { bodyLimit: 4 * 1024 * 1024 },
+    async (request, reply) => {
+      try {
+        const { projectId } = z.object({ projectId: z.string().min(1) }).parse(request.params);
+        const body = z
+          .object({
+            title: z.string().min(1).max(160).optional(),
+            genre: z.string().max(80).optional(),
+            premise: z.string().max(2000).optional(),
+            authorMasterOutlineMarkdown: z.string().max(100_000).optional(),
+            styleConfig: styleReferenceConfigSchema.partial().optional(),
+            copilotCatId: z.string().min(1).max(80).optional(),
+            enableMechanicsLedger: z.boolean().optional(),
+          })
+          .parse(request.body ?? {});
+        const project = runtime.orchestrator.updateMasterOutlineAndStyle(projectId, body);
+        return { project, bundle: runtime.projectStore.loadBundle(projectId) };
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  app.post('/api/novel-studio/projects/:projectId/chapters/:chapterNo/ideate', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const body = z
+        .object({
+          authorSeedHint: z.string().max(2000).optional(),
+          backtrackMode: backtrackModeSchema.optional(),
+          wakeCat: z.boolean().default(true),
+        })
+        .parse(request.body ?? {});
+      const result = await runtime.orchestrator.requestChapterDirections(projectId, chapterNo, body);
+      return { ...result, bundle: runtime.projectStore.loadBundle(projectId) };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/novel-studio/projects/:projectId/chapters/:chapterNo/generate', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const body = z
+        .object({
+          selectedOptionIds: z.array(z.string().min(1).max(40)).max(5).optional(),
+          customAuthorInput: z.string().max(4000).optional(),
+          chapterPromptNotes: z.string().max(2000).optional(),
+          backtrackMode: backtrackModeSchema.optional(),
+          wakeCat: z.boolean().default(true),
+        })
+        .parse(request.body ?? {});
+      const result = await runtime.orchestrator.generateChapterFromChoice(projectId, chapterNo, body);
+      return { ...result, bundle: runtime.projectStore.loadBundle(projectId) };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.put(
+    '/api/novel-studio/projects/:projectId/chapters/:chapterNo/draft',
+    { bodyLimit: 8 * 1024 * 1024 },
+    async (request, reply) => {
+      try {
+        const { projectId, chapterNo } = z
+          .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+          .parse(request.params);
+        const body = z
+          .object({
+            title: z.string().max(120).optional(),
+            content: z.string().max(120_000),
+            authorNotes: z.string().max(2000).optional(),
+          })
+          .parse(request.body);
+        return runtime.orchestrator.saveManualChapterDraft(projectId, chapterNo, body);
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  app.post(
+    '/api/novel-studio/projects/:projectId/chapters/:chapterNo/finalize',
+    { bodyLimit: 8 * 1024 * 1024 },
+    async (request, reply) => {
+      try {
+        const { projectId, chapterNo } = z
+          .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+          .parse(request.params);
+        const body = z
+          .object({
+            title: z.string().max(120).optional(),
+            finalTextOverride: z.string().max(120_000).optional(),
+            stateDeltaOverride: chapterStateDeltaSchema.optional(),
+            authorNotes: z.string().max(2000).optional(),
+            wakeCatForDeepSummary: z.boolean().default(false),
+          })
+          .parse(request.body ?? {});
+        return await runtime.orchestrator.finalizeAndSummarizeChapter({
+          projectId,
+          chapterNo,
+          ...body,
+        });
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  app.put('/api/novel-studio/projects/:projectId/chapters/:chapterNo/summary', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const body = z
+        .object({
+          summary: distilledChapterSummarySchema
+            .omit({ chapterNo: true, wordCount: true, summarizedAt: true })
+            .extend({ wordCount: z.number().int().min(0).optional(), summarizedAt: z.string().optional() }),
+          stateDelta: chapterStateDeltaSchema.optional(),
+          worldbuildingAdditions: z.array(z.string().min(1).max(400)).max(30).optional(),
+          rollingSynopsisMarkdown: z.string().max(100_000).optional(),
+        })
+        .parse(request.body);
+      return runtime.orchestrator.submitChapterSummary({
+        projectId,
+        chapterNo,
+        ...body,
+      });
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/novel-studio/projects/:projectId/chapters/:chapterNo/restore-version', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const { versionId } = z.object({ versionId: z.string().min(1) }).parse(request.body);
+      return runtime.orchestrator.restoreChapterVersion(projectId, chapterNo, versionId);
     } catch (err) {
       return sendError(reply, err);
     }
@@ -845,20 +1010,40 @@ export const callbackNovelStudioRoutes: FastifyPluginAsync<CallbackNovelStudioRo
       if (!bundle) throw new Error(`Novel project not found: ${targetId}`);
 
       if (body.chapterNo !== undefined) {
-        const hasState = Boolean(bundle.project.chapters[String(body.chapterNo)]);
-        const packet = hasState
-          ? runtime.orchestrator.getChapterWorkPacket(targetId, body.chapterNo)
-          : await runtime.orchestrator.prepareAndStartChapter(targetId, body.chapterNo, { wakeCatsInThread: false });
+        const hasLegacyOutline = bundle.project.chapterOutlines.some((o) => o.chapterNo === body.chapterNo);
+        const existingRec = bundle.project.chapters[String(body.chapterNo)];
+        const copilotMode =
+          existingRec?.stage === 'drafting' || existingRec?.stage === 'draft_ready'
+            ? 'draft'
+            : existingRec?.stage === 'summarizing' || existingRec?.stage === 'completed'
+              ? 'summarize'
+              : 'ideate';
+        const copilotContextPacket = await runtime.orchestrator.getCopilotContextPacket(
+          targetId,
+          body.chapterNo,
+          copilotMode,
+        );
+
+        let chapterWorkPacket: unknown;
+        if (hasLegacyOutline) {
+          chapterWorkPacket = existingRec
+            ? runtime.orchestrator.getChapterWorkPacket(targetId, body.chapterNo)
+            : await runtime.orchestrator.prepareAndStartChapter(targetId, body.chapterNo, { wakeCatsInThread: false });
+        }
+
         return {
           projectSummary: {
             id: bundle.project.id,
             title: bundle.project.title,
             genre: bundle.project.genre,
+            copilotCatId: bundle.project.copilotCatId,
+            styleConfig: bundle.project.styleConfig,
             workflow: bundle.project.workflow,
             catRoster: bundle.project.catRoster,
           },
-          chapterWorkPacket: packet,
-          chapterRecord: bundle.project.chapters[String(body.chapterNo)],
+          copilotContextPacket,
+          chapterWorkPacket,
+          chapterRecord: runtime.projectStore.loadBundle(targetId)?.project.chapters[String(body.chapterNo)],
         };
       }
 
@@ -928,7 +1113,8 @@ export const callbackNovelStudioRoutes: FastifyPluginAsync<CallbackNovelStudioRo
         .object({
           projectId: z.string().min(1),
           chapterNo: z.number().int().min(1),
-          draftKind: z.enum(['raw', 'humanized']).default('raw'),
+          title: z.string().max(120).optional(),
+          draftKind: z.enum(['raw', 'humanized', 'copilot']).default('raw'),
           content: z.string().min(100),
           proposedStateDelta: chapterStateDeltaSchema.optional(),
         })
@@ -937,6 +1123,7 @@ export const callbackNovelStudioRoutes: FastifyPluginAsync<CallbackNovelStudioRo
         projectId: body.projectId,
         chapterNo: body.chapterNo,
         authorCatId: principal.catId,
+        title: body.title,
         draftKind: body.draftKind,
         content: body.content,
         proposedStateDelta: body.proposedStateDelta,
@@ -944,10 +1131,64 @@ export const callbackNovelStudioRoutes: FastifyPluginAsync<CallbackNovelStudioRo
       });
       return {
         chapterNo: body.chapterNo,
+        title: result.record.title,
         stage: result.record.stage,
         charCount: body.content.length,
         aiFlavorScore: result.aiFlavorScore,
         aiFlagCount: result.flagCount,
+        continuityWarnings: result.record.precheckWarnings,
+      };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/callbacks/novel-studio/submit-directions', async (request, reply) => {
+    const principal = requireCallbackPrincipal(request, reply);
+    if (!principal) return;
+    try {
+      const body = z
+        .object({
+          projectId: z.string().min(1),
+          chapterNo: z.number().int().min(1),
+          options: z.array(chapterDirectionOptionSchema).min(1).max(5),
+        })
+        .parse(request.body);
+      const record = runtime.orchestrator.saveChapterDirections(body.projectId, body.chapterNo, body.options);
+      return {
+        projectId: body.projectId,
+        chapterNo: body.chapterNo,
+        stage: record.stage,
+        optionCount: record.directionOptions.length,
+      };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/callbacks/novel-studio/submit-summary', { bodyLimit: 4 * 1024 * 1024 }, async (request, reply) => {
+    const principal = requireCallbackPrincipal(request, reply);
+    if (!principal) return;
+    try {
+      const body = z
+        .object({
+          projectId: z.string().min(1),
+          chapterNo: z.number().int().min(1),
+          summary: distilledChapterSummarySchema
+            .omit({ chapterNo: true, wordCount: true, summarizedAt: true })
+            .extend({ wordCount: z.number().int().min(0).optional(), summarizedAt: z.string().optional() }),
+          stateDelta: chapterStateDeltaSchema.optional(),
+          worldbuildingAdditions: z.array(z.string().min(1).max(400)).max(30).optional(),
+          rollingSynopsisMarkdown: z.string().max(100_000).optional(),
+        })
+        .parse(request.body);
+      const bundle = runtime.orchestrator.submitChapterSummary(body);
+      return {
+        projectId: bundle.project.id,
+        chapterNo: body.chapterNo,
+        stage: bundle.project.chapters[String(body.chapterNo)]?.stage,
+        canonRevision: bundle.canon.revision,
+        continuityAlerts: bundle.project.continuityAlerts,
       };
     } catch (err) {
       return sendError(reply, err);

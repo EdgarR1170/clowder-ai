@@ -1,30 +1,31 @@
 'use client';
 
-import { type FC, useCallback, useEffect, useState } from 'react';
+import { type FC, useCallback, useEffect, useMemo, useState } from 'react';
 import { pushThreadRouteWithHistory } from '@/components/ThreadSidebar/thread-navigation';
 import { CanonAndReaderPanel } from './CanonAndReaderPanel';
-import { ChapterPipelinePanel } from './ChapterPipelinePanel';
-import { BookIcon, FeatherIcon, MatrixIcon, PipelineIcon } from './NovelIcons';
+import { ChapterCopilotPanel } from './ChapterCopilotPanel';
+import { BookIcon, FeatherIcon, SparklesIcon } from './NovelIcons';
 import { type NovelOverviewResponse, type NovelProjectBundleDto, novelStudioApi } from './novel-studio-api';
 import { ReferenceLibraryPanel } from './ReferenceLibraryPanel';
-import { SkillMatrixPanel } from './SkillMatrixPanel';
 
-type StudioTab = 'library' | 'matrix' | 'pipeline' | 'reader';
+type StudioTab = 'copilot' | 'bible' | 'styles';
 
 interface NovelStudioWorkbenchProps {
   onRequestSplitChat?: () => void;
 }
 
 export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestSplitChat }) => {
-  const [activeTab, setActiveTab] = useState<StudioTab>('library');
+  const [activeTab, setActiveTab] = useState<StudioTab>('copilot');
   const [overview, setOverview] = useState<NovelOverviewResponse | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
   const [bundle, setBundle] = useState<NovelProjectBundleDto | null>(null);
-  const [readerChapterNo, setReaderChapterNo] = useState<number>(1);
+  const [selectedChapterNo, setSelectedChapterNo] = useState<number>(1);
   const [showNewProject, setShowNewProject] = useState(false);
+
   const [newTitle, setNewTitle] = useState('');
-  const [newGenre, setNewGenre] = useState('东方玄幻 / 群像权谋');
-  const [newPremise, setNewPremise] = useState('');
+  const [newGenre, setNewGenre] = useState('奇幻悬疑 / 群像长篇');
+  const [newMasterOutline, setNewMasterOutline] = useState('');
+  const [newCopilotCatId, setNewCopilotCatId] = useState('kimi');
   const [newMechanics, setNewMechanics] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,8 +35,14 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
       const data = await novelStudioApi.fetchOverview();
       setOverview(data);
       setError(null);
-      if (!selectedProjectId && data.projects.length > 0) {
-        setSelectedProjectId(data.projects[0]!.id);
+      const firstProject = data.projects[0];
+      if (!selectedProjectId && firstProject) {
+        setSelectedProjectId(firstProject.id);
+        setSelectedChapterNo(firstProject.currentChapterNo || 1);
+      }
+      const firstCat = data.cats[0];
+      if (firstCat && !data.cats.some((c) => c.id === 'kimi')) {
+        setNewCopilotCatId(firstCat.id);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -48,8 +55,8 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
       return;
     }
     try {
-      const b = await novelStudioApi.getProjectBundle(projectId);
-      setBundle(b);
+      const loaded = await novelStudioApi.getProjectBundle(projectId);
+      setBundle(loaded);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -65,6 +72,21 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
     }
   }, [selectedProjectId, loadBundle]);
 
+  const hasInFlightChapter = useMemo(() => {
+    if (!bundle) return false;
+    return Object.values(bundle.project.chapters).some((ch) =>
+      ['ideating', 'drafting', 'summarizing', 'rewriting'].includes(ch.stage),
+    );
+  }, [bundle]);
+
+  useEffect(() => {
+    if (!hasInFlightChapter || !selectedProjectId) return undefined;
+    const timer = window.setInterval(() => {
+      void loadBundle(selectedProjectId);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [hasInFlightChapter, selectedProjectId, loadBundle]);
+
   const refreshAll = useCallback(async () => {
     await loadOverview();
     if (selectedProjectId) await loadBundle(selectedProjectId);
@@ -77,17 +99,20 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
       const created = await novelStudioApi.createProject({
         title: newTitle.trim(),
         genre: newGenre.trim(),
-        premise: newPremise.trim(),
+        premise: newMasterOutline.trim().slice(0, 400),
+        authorMasterOutlineMarkdown: newMasterOutline.trim(),
+        copilotCatId: newCopilotCatId,
         enableMechanicsLedger: newMechanics,
         createEditorialThread: true,
       });
       setNewTitle('');
-      setNewPremise('');
+      setNewMasterOutline('');
       setShowNewProject(false);
       await loadOverview();
       setSelectedProjectId(created.project.id);
+      setSelectedChapterNo(1);
       setBundle(created);
-      setActiveTab('matrix');
+      setActiveTab('copilot');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -96,6 +121,7 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
   };
 
   const jumpToEditorialThread = (threadId: string) => {
+    if (!threadId) return;
     if (typeof window !== 'undefined') {
       pushThreadRouteWithHistory(threadId, window);
     }
@@ -107,10 +133,15 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
       {/* Studio Header & Project Selector */}
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-cafe bg-cafe-surface px-4 py-2.5">
         <div className="flex flex-wrap items-center gap-2.5">
-          <span className="font-serif text-base font-semibold tracking-tight text-cafe">Clowder · 小说工坊</span>
+          <span className="font-serif text-base font-semibold tracking-tight text-cafe">Clowder · 小说共创工坊</span>
           <select
             value={selectedProjectId}
-            onChange={(e) => setSelectedProjectId(e.target.value)}
+            onChange={(e) => {
+              const pid = e.target.value;
+              setSelectedProjectId(pid);
+              const matched = overview?.projects.find((p) => p.id === pid);
+              if (matched) setSelectedChapterNo(matched.currentChapterNo || 1);
+            }}
             className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1 text-xs font-medium text-cafe"
           >
             {(!overview || overview.projects.length === 0) && <option value="">尚未创建小说项目</option>}
@@ -129,14 +160,13 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
           </button>
         </div>
 
-        {/* 4 Core Studio Tabs */}
+        {/* 3 Focused Co-Pilot Tabs */}
         <nav className="flex items-center gap-1 rounded-lg bg-cafe-surface-sunken p-1">
           {(
             [
-              ['library', '1. 藏书拆解与向量库', BookIcon],
-              ['matrix', '2. 多书技法矩阵', MatrixIcon],
-              ['pipeline', '3. 大纲与逐章协调', PipelineIcon],
-              ['reader', '4. 审稿与防穿帮账本', FeatherIcon],
+              ['copilot', '1. 逐章共创台', SparklesIcon],
+              ['bible', '2. 总结大纲与设定集', FeatherIcon],
+              ['styles', '3. 参照小说风格库', BookIcon],
             ] as const
           ).map(([id, label, Icon]) => (
             <button
@@ -154,43 +184,56 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
         </nav>
       </header>
 
-      {/* New Novel Project Drawer */}
+      {/* New Novel Project Drawer with Human Initial Outline Input */}
       {showNewProject && (
         <div className="border-b border-cafe bg-cafe-surface-sunken px-4 py-3">
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-4">
-            <input
-              type="text"
-              value={newTitle}
-              onChange={(e) => setNewTitle(e.target.value)}
-              placeholder="新小说书名（必填）"
-              className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
-            />
-            <input
-              type="text"
-              value={newGenre}
-              onChange={(e) => setNewGenre(e.target.value)}
-              placeholder="题材类型（如：仙侠 / 赛博悬疑 / 系统无限流）"
-              className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
-            />
-            <input
-              type="text"
-              value={newPremise}
-              onChange={(e) => setNewPremise(e.target.value)}
-              placeholder="一句话核心卖点/设定钩子"
-              className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+          <div className="space-y-2.5">
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+              <input
+                type="text"
+                value={newTitle}
+                onChange={(e) => setNewTitle(e.target.value)}
+                placeholder="新小说书名（必填）"
+                className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+              />
+              <input
+                type="text"
+                value={newGenre}
+                onChange={(e) => setNewGenre(e.target.value)}
+                placeholder="题材类型（如：东方仙侠 / 悬疑无限流 / 都市异能）"
+                className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+              />
+              <select
+                value={newCopilotCatId}
+                onChange={(e) => setNewCopilotCatId(e.target.value)}
+                className="rounded-md border border-cafe bg-cafe-surface-canvas px-2.5 py-1.5 text-xs text-cafe"
+              >
+                {(overview?.cats ?? [{ id: 'kimi', name: '梵花猫' }]).map((c) => (
+                  <option key={c.id} value={c.id}>
+                    主创共创猫：{c.nickname ? `${c.nickname} (${c.name})` : c.name} (@{c.id})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <textarea
+              rows={4}
+              value={newMasterOutline}
+              onChange={(e) => setNewMasterOutline(e.target.value)}
+              placeholder="输入你的初始大纲 / 故事主线构想（例如：主角身份、开篇处境、核心目标与大致故事走向。后续每一章开写前，猫猫会据此给出 5 个具体推进方向供你选择）..."
+              className="w-full rounded-md border border-cafe bg-cafe-surface-canvas p-2.5 text-xs leading-relaxed text-cafe"
             />
             <div className="flex items-center justify-between gap-2">
               <label className="flex items-center gap-1.5 text-xs text-cafe-secondary">
                 <input type="checkbox" checked={newMechanics} onChange={(e) => setNewMechanics(e.target.checked)} />
-                启用系统数值账本
+                启用可选系统/境界数值账本
               </label>
               <button
                 type="button"
                 disabled={creating || !newTitle.trim()}
-                onClick={handleCreateProject}
-                className="rounded-md bg-cafe-accent px-3 py-1.5 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover disabled:opacity-50"
+                onClick={() => void handleCreateProject()}
+                className="rounded-md bg-cafe-accent px-4 py-1.5 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover disabled:opacity-50"
               >
-                {creating ? '立项中...' : '创建并开启编辑部'}
+                {creating ? '立项中...' : '创建小说并进入第 1 章共创'}
               </button>
             </div>
           </div>
@@ -205,62 +248,56 @@ export const NovelStudioWorkbench: FC<NovelStudioWorkbenchProps> = ({ onRequestS
           </div>
         )}
 
-        {activeTab === 'library' && overview && (
+        {activeTab === 'styles' && overview && (
           <ReferenceLibraryPanel
             books={overview.books}
-            skills={overview.skills}
-            cats={overview.cats}
+            activeProject={bundle?.project}
             embeddingConfig={overview.embeddingConfig}
-            activeProjectThreadId={bundle?.project.threadId}
             onRefresh={refreshAll}
           />
         )}
 
-        {activeTab !== 'library' && !bundle && (
+        {activeTab !== 'styles' && !bundle && (
           <div className="rounded-xl border border-dashed border-cafe bg-cafe-surface p-10 text-center">
-            <p className="text-sm font-medium text-cafe">请先在左上方新建一部小说工程</p>
+            <p className="text-sm font-medium text-cafe">开启你的第一部人机共创小说</p>
             <p className="mt-1 text-xs text-cafe-muted">
-              新建项目后会自动创建专属「多猫编辑部」群聊，并可为大纲/战斗/人设/场景分别绑定不同参考书的技法 Skill。
+              由你输入初始大纲构想 → 每章前 AI 提出 5 个推进思路与提问供你选择或补充 →
+              一章一章稳步生成并自动反向沉淀总结式大纲与设定，支持随时回溯重写任意章节。
             </p>
             <button
               type="button"
               onClick={() => setShowNewProject(true)}
               className="mt-4 rounded-md bg-cafe-accent px-4 py-2 text-xs font-medium text-cafe-white hover:bg-cafe-accent-hover"
             >
-              立即立项新小说
+              立即输入初始大纲并新建小说
             </button>
           </div>
         )}
 
-        {activeTab === 'matrix' && bundle && overview && (
-          <SkillMatrixPanel
+        {activeTab === 'copilot' && bundle && overview && (
+          <ChapterCopilotPanel
             project={bundle.project}
             books={overview.books}
-            skills={overview.skills}
             cats={overview.cats}
+            selectedChapterNo={selectedChapterNo}
+            onSelectChapterNo={setSelectedChapterNo}
             onUpdated={refreshAll}
-          />
-        )}
-
-        {activeTab === 'pipeline' && bundle && (
-          <ChapterPipelinePanel
-            project={bundle.project}
-            onUpdated={refreshAll}
-            onSelectChapterForReader={(no) => {
-              setReaderChapterNo(no);
-              setActiveTab('reader');
-            }}
             onJumpToThread={jumpToEditorialThread}
+            onOpenSummaryTab={() => setActiveTab('bible')}
           />
         )}
 
-        {activeTab === 'reader' && bundle && (
+        {activeTab === 'bible' && bundle && (
           <CanonAndReaderPanel
             project={bundle.project}
             canon={bundle.canon}
             mechanics={bundle.mechanics}
-            selectedChapterNo={readerChapterNo}
-            onSelectChapterNo={setReaderChapterNo}
+            selectedChapterNo={selectedChapterNo}
+            onSelectChapterNo={setSelectedChapterNo}
+            onJumpToCopilotChapter={(no) => {
+              setSelectedChapterNo(no);
+              setActiveTab('copilot');
+            }}
             onUpdated={refreshAll}
           />
         )}

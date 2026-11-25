@@ -1,11 +1,22 @@
 import {
+  type ArchivedBranchRecord,
+  type BacktrackMode,
+  type ChapterDirectionOption,
   type ChapterOutline,
   type ChapterQualityReport,
   type ChapterStateDelta,
   type ChapterStateRecord,
+  type ChapterVersionSnapshot,
+  type ContinuityBridgeAlert,
+  chapterDirectionOptionSchema,
   chapterOutlineSchema,
   chapterStateDeltaSchema,
   type DimensionSkillBinding,
+  type DistilledChapterSummary,
+  distilledChapterSummarySchema,
+  isChapterCompletedStage,
+  type MechanicsLedger,
+  type NarrativeGraph,
   type NovelCraftDimension,
   type NovelProject,
   type NovelWorkflowConfig,
@@ -13,8 +24,10 @@ import {
   type Prose5AxisScore,
   type RetrievedBeatPassage,
   type StoryArc,
+  type StyleReferenceConfig,
   storyArcSchema,
 } from '@cat-cafe/shared';
+import { nanoid } from 'nanoid';
 import {
   applyCommittedChapterDelta,
   buildPreChapterConstraints,
@@ -24,6 +37,14 @@ import type { NovelEmbeddingProviderRegistry } from '../corpus/novel-embedding-p
 import type { NovelVectorStore } from '../corpus/novel-vector-store.js';
 import { analyzeChineseAiFlavor, lightPolishAiCliches } from '../humanizer/humanizer-zh.js';
 import type { BookToSkillCompiler } from '../skill-compiler/book-to-skill-compiler.js';
+import {
+  buildCopilotContextPacket,
+  buildDeterministicChapterSummary,
+  type ChapterCopilotContextPacket,
+  detectDownstreamContinuityAlert,
+  mergeWorldbuildingMarkdown,
+  rebuildRollingSynopsisMarkdown,
+} from './copilot-context-builder.js';
 import type { FullNovelProjectBundle, NovelProjectStore } from './novel-project-store.js';
 
 export interface ThreadCoordinatorPort {
@@ -176,6 +197,8 @@ export class ChapterOrchestrator {
     project.workflow.autoRemainingChapters = 0;
 
     const activeStages = new Set<ChapterStateRecord['stage']>([
+      'ideating',
+      'summarizing',
       'prechecking',
       'drafting',
       'reviewing',
@@ -296,8 +319,16 @@ export class ChapterOrchestrator {
     const now = new Date().toISOString();
     const nextRecord: ChapterStateRecord = {
       chapterNo,
+      title: existingRecord?.title || outline.title,
       stage: 'drafting',
       rewriteRound: resetDraft ? 0 : (existingRecord?.rewriteRound ?? 0),
+      authorSeedHint: existingRecord?.authorSeedHint ?? '',
+      backtrackMode: existingRecord?.backtrackMode,
+      directionOptions: existingRecord?.directionOptions ?? [],
+      selectedDirection: existingRecord?.selectedDirection,
+      distilledSummary: resetDraft ? undefined : existingRecord?.distilledSummary,
+      versionHistory: existingRecord?.versionHistory ?? [],
+      continuityAlert: resetDraft ? undefined : existingRecord?.continuityAlert,
       activeSkillSlugs: [...activeSkillSlugs],
       precheckConstraintsMarkdown: precheck.constraintsMarkdown,
       precheckWarnings: precheck.violations,
@@ -390,19 +421,27 @@ export class ChapterOrchestrator {
   }
 
   /**
-   * Step 2 of Chapter Loop: Writer Cat submits draft (or humanized revision).
+   * Step 2 of Chapter Loop: Writer / Co-Pilot Cat submits draft (or humanized revision).
    */
   async submitChapterDraft(params: {
     projectId: string;
     chapterNo: number;
     authorCatId: string;
-    draftKind: 'raw' | 'humanized';
+    title?: string;
+    draftKind: 'raw' | 'humanized' | 'copilot';
     content: string;
     proposedStateDelta?: ChapterStateDelta;
     wakeNextCat?: boolean;
   }): Promise<{ record: ChapterStateRecord; aiFlavorScore: number; flagCount: number }> {
     const bundle = this.mustLoad(params.projectId);
     const { project } = bundle;
+    const hasLegacyOutline = project.chapterOutlines.some((o) => o.chapterNo === params.chapterNo);
+    const isCopilotDraft = params.draftKind === 'copilot' || !hasLegacyOutline;
+
+    if (isCopilotDraft) {
+      return this.submitCopilotDraftInternal(bundle, params);
+    }
+
     const record = this.mustChapterRecord(project, params.chapterNo);
     const wasPaused = record.stage === 'paused';
     const styleSkill = record.activeSkillSlugs
@@ -412,6 +451,10 @@ export class ChapterOrchestrator {
     const parsedDelta = params.proposedStateDelta
       ? chapterStateDeltaSchema.parse(params.proposedStateDelta)
       : record.proposedStateDelta;
+
+    if (params.title?.trim()) {
+      record.title = params.title.trim();
+    }
 
     if (params.draftKind === 'raw') {
       record.rawDraft = params.content.trim();
@@ -438,8 +481,10 @@ export class ChapterOrchestrator {
 
     if (!wasPaused && params.draftKind === 'humanized' && project.workflow.approvalMode === 'auto-continuous') {
       await this.commitChapterInternal(bundle, params.chapterNo, params.wakeNextCat ?? true);
+      const updated = this.mustLoad(params.projectId).project.chapters[String(params.chapterNo)];
+      if (!updated) throw new Error(`Chapter ${params.chapterNo} missing after commit`);
       return {
-        record: this.mustLoad(params.projectId).project.chapters[String(params.chapterNo)]!,
+        record: updated,
         aiFlavorScore: report.aiFlavorScore,
         flagCount: report.flags.length,
       };
@@ -794,6 +839,721 @@ export class ChapterOrchestrator {
       specialistNotes: record.specialistNotes,
       lastCritique: lastReport?.summaryCritique,
     };
+  }
+
+  // =========================================================================
+  // Human-in-the-Loop Chapter Co-Pilot Methods (Bottom-Up 5-Direction Flow)
+  // =========================================================================
+
+  updateMasterOutlineAndStyle(
+    projectId: string,
+    input: {
+      title?: string;
+      genre?: string;
+      premise?: string;
+      authorMasterOutlineMarkdown?: string;
+      styleConfig?: Partial<StyleReferenceConfig>;
+      copilotCatId?: string;
+      enableMechanicsLedger?: boolean;
+    },
+  ): NovelProject {
+    const bundle = this.mustLoad(projectId);
+    const { project, mechanics } = bundle;
+
+    if (input.title?.trim()) project.title = input.title.trim();
+    if (input.genre?.trim()) project.genre = input.genre.trim();
+    if (input.premise !== undefined) project.premise = input.premise;
+    if (input.authorMasterOutlineMarkdown !== undefined) {
+      project.authorMasterOutlineMarkdown = input.authorMasterOutlineMarkdown;
+    }
+    if (input.styleConfig) {
+      project.styleConfig = {
+        ...project.styleConfig,
+        ...input.styleConfig,
+      };
+    }
+    if (input.copilotCatId?.trim()) {
+      project.copilotCatId = input.copilotCatId.trim();
+      project.catRoster.writerCatId = project.copilotCatId;
+    }
+    if (input.enableMechanicsLedger !== undefined) {
+      project.workflow.enableMechanicsLedger = input.enableMechanicsLedger;
+      mechanics.enabled = input.enableMechanicsLedger;
+    }
+
+    this.store.saveBundle(project, undefined, mechanics);
+    return this.mustLoad(projectId).project;
+  }
+
+  async getCopilotContextPacket(
+    projectId: string,
+    chapterNo: number,
+    mode: 'ideate' | 'draft' | 'summarize' = 'ideate',
+  ): Promise<ChapterCopilotContextPacket> {
+    const bundle = this.mustLoad(projectId);
+    const canonAtStart = this.loadCanonAtChapterStart(bundle, chapterNo);
+    const mechanicsAtStart = this.loadMechanicsAtChapterStart(bundle, chapterNo);
+    return buildCopilotContextPacket({
+      project: bundle.project,
+      canonAtStart,
+      mechanicsAtStart,
+      chapterNo,
+      mode,
+      corpus: this.corpus,
+      embedder: this.embedRegistry.resolveActiveEmbedder(),
+    });
+  }
+
+  async requestChapterDirections(
+    projectId: string,
+    chapterNo: number,
+    options: {
+      authorSeedHint?: string;
+      backtrackMode?: BacktrackMode;
+      wakeCat?: boolean;
+    } = {},
+  ): Promise<{
+    project: NovelProject;
+    chapterRecord: ChapterStateRecord;
+    contextPacket: ChapterCopilotContextPacket;
+  }> {
+    if (chapterNo < 1) throw new Error('chapterNo must be >= 1');
+    const bundle = this.mustLoad(projectId);
+    this.applyBacktrackPreparation(bundle, chapterNo, options.backtrackMode);
+
+    const record = this.ensureChapterRecord(bundle.project, chapterNo);
+    if (options.authorSeedHint !== undefined) {
+      record.authorSeedHint = options.authorSeedHint.trim();
+    }
+    record.stage = 'ideating';
+    record.updatedAt = new Date().toISOString();
+    bundle.project.currentChapterNo = chapterNo;
+
+    const contextPacket = await buildCopilotContextPacket({
+      project: bundle.project,
+      canonAtStart: this.loadCanonAtChapterStart(bundle, chapterNo),
+      mechanicsAtStart: this.loadMechanicsAtChapterStart(bundle, chapterNo),
+      chapterNo,
+      mode: 'ideate',
+      corpus: this.corpus,
+      embedder: this.embedRegistry.resolveActiveEmbedder(),
+    });
+    record.precheckConstraintsMarkdown = contextPacket.continuityConstraintsMarkdown;
+    record.ragPassages = contextPacket.referenceStyle.ideationStructuralBeats;
+
+    if (options.wakeCat !== false && this.threadCoordinator) {
+      await this.dispatchCopilotPrompt(
+        bundle.project,
+        this.buildCopilotIdeationDispatchMessage(bundle.project, chapterNo, contextPacket),
+      );
+    }
+    this.store.saveBundle(bundle.project, bundle.canon, bundle.mechanics);
+
+    const refreshed = this.mustLoad(projectId).project;
+    const updatedRec = this.ensureChapterRecord(refreshed, chapterNo);
+    return { project: refreshed, chapterRecord: updatedRec, contextPacket };
+  }
+
+  saveChapterDirections(
+    projectId: string,
+    chapterNo: number,
+    directionOptions: ChapterDirectionOption[],
+  ): ChapterStateRecord {
+    const bundle = this.mustLoad(projectId);
+    const parsed = directionOptions.map((opt) => chapterDirectionOptionSchema.parse(opt));
+    if (parsed.length === 0 || parsed.length > 5) {
+      throw new Error('directionOptions must contain 1 to 5 options');
+    }
+    const record = this.ensureChapterRecord(bundle.project, chapterNo);
+    record.directionOptions = parsed;
+    record.stage = 'awaiting_choice';
+    record.updatedAt = new Date().toISOString();
+    this.store.saveBundle(bundle.project);
+    return this.ensureChapterRecord(this.mustLoad(projectId).project, chapterNo);
+  }
+
+  async generateChapterFromChoice(
+    projectId: string,
+    chapterNo: number,
+    input: {
+      selectedOptionIds?: string[];
+      customAuthorInput?: string;
+      chapterPromptNotes?: string;
+      backtrackMode?: BacktrackMode;
+      wakeCat?: boolean;
+    },
+  ): Promise<{
+    project: NovelProject;
+    chapterRecord: ChapterStateRecord;
+    contextPacket: ChapterCopilotContextPacket;
+  }> {
+    const selectedOptionIds = input.selectedOptionIds ?? [];
+    const customAuthorInput = input.customAuthorInput?.trim() ?? '';
+    const chapterPromptNotes = input.chapterPromptNotes?.trim() ?? '';
+
+    if (selectedOptionIds.length === 0 && !customAuthorInput) {
+      throw new Error('请至少勾选 1 个推进方向，或输入你自己的本章剧情想法。');
+    }
+
+    const bundle = this.mustLoad(projectId);
+    const existing = bundle.project.chapters[String(chapterNo)];
+    if (existing && isChapterCompletedStage(existing.stage)) {
+      this.applyBacktrackPreparation(bundle, chapterNo, input.backtrackMode);
+    }
+
+    const record = this.ensureChapterRecord(bundle.project, chapterNo);
+    record.selectedDirection = {
+      selectedOptionIds,
+      customAuthorInput,
+      chapterPromptNotes,
+      decidedAt: new Date().toISOString(),
+    };
+    record.stage = 'drafting';
+    record.writerCatId = bundle.project.copilotCatId;
+    record.updatedAt = new Date().toISOString();
+    bundle.project.currentChapterNo = chapterNo;
+
+    const contextPacket = await buildCopilotContextPacket({
+      project: bundle.project,
+      canonAtStart: this.loadCanonAtChapterStart(bundle, chapterNo),
+      mechanicsAtStart: this.loadMechanicsAtChapterStart(bundle, chapterNo),
+      chapterNo,
+      mode: 'draft',
+      corpus: this.corpus,
+      embedder: this.embedRegistry.resolveActiveEmbedder(),
+    });
+    record.precheckConstraintsMarkdown = contextPacket.continuityConstraintsMarkdown;
+    record.ragPassages = contextPacket.referenceStyle.proseCadenceSamples;
+
+    if (input.wakeCat !== false && this.threadCoordinator) {
+      await this.dispatchCopilotPrompt(
+        bundle.project,
+        this.buildCopilotDraftDispatchMessage(bundle.project, chapterNo, contextPacket),
+      );
+    }
+    this.store.saveBundle(bundle.project, bundle.canon, bundle.mechanics);
+
+    const refreshed = this.mustLoad(projectId).project;
+    return {
+      project: refreshed,
+      chapterRecord: this.ensureChapterRecord(refreshed, chapterNo),
+      contextPacket,
+    };
+  }
+
+  saveManualChapterDraft(
+    projectId: string,
+    chapterNo: number,
+    input: { title?: string; content: string; authorNotes?: string },
+  ): FullNovelProjectBundle {
+    const bundle = this.mustLoad(projectId);
+    const record = this.ensureChapterRecord(bundle.project, chapterNo);
+    const text = input.content;
+
+    if (input.title !== undefined) {
+      record.title = input.title.trim();
+    }
+    if (!record.rawDraft) {
+      record.rawDraft = text;
+    }
+    record.humanizedDraft = text;
+    record.finalText = text;
+    if (input.authorNotes !== undefined) {
+      record.authorNotes = input.authorNotes;
+    }
+    if (!isChapterCompletedStage(record.stage) && text.trim().length > 0) {
+      record.stage = 'draft_ready';
+    }
+    record.updatedAt = new Date().toISOString();
+
+    this.store.saveBundle(bundle.project);
+    return this.mustLoad(projectId);
+  }
+
+  async finalizeAndSummarizeChapter(params: {
+    projectId: string;
+    chapterNo: number;
+    title?: string;
+    finalTextOverride?: string;
+    stateDeltaOverride?: ChapterStateDelta;
+    authorNotes?: string;
+    wakeCatForDeepSummary?: boolean;
+  }): Promise<FullNovelProjectBundle> {
+    const bundle = this.mustLoad(params.projectId);
+    const { project } = bundle;
+    const record = this.ensureChapterRecord(project, params.chapterNo);
+
+    if (params.title?.trim()) {
+      record.title = params.title.trim();
+    }
+    if (params.stateDeltaOverride) {
+      record.proposedStateDelta = chapterStateDeltaSchema.parse(params.stateDeltaOverride);
+    }
+    if (params.authorNotes !== undefined) {
+      record.authorNotes = params.authorNotes;
+    }
+    const resolvedText = (
+      params.finalTextOverride?.trim() ||
+      record.finalText.trim() ||
+      record.humanizedDraft.trim() ||
+      record.rawDraft.trim()
+    ).trim();
+
+    if (!resolvedText) {
+      throw new Error(`第 ${params.chapterNo} 章正文为空，无法确认定稿。`);
+    }
+    record.finalText = resolvedText;
+    if (!record.humanizedDraft.trim()) {
+      record.humanizedDraft = resolvedText;
+    }
+
+    const canonBefore = this.loadCanonAtChapterStart(bundle, params.chapterNo);
+    const baselineSummary = buildDeterministicChapterSummary({
+      chapterNo: params.chapterNo,
+      title: record.title || undefined,
+      text: resolvedText,
+      canonBefore,
+    });
+    record.title = baselineSummary.title;
+    record.distilledSummary = baselineSummary;
+    record.stage = 'completed';
+    record.updatedAt = new Date().toISOString();
+
+    this.replaySnapshotsAndSynopsesFrom(bundle, params.chapterNo);
+
+    const maxCompleted = this.findMaxCompletedChapterNo(project);
+    if (params.chapterNo >= maxCompleted) {
+      project.currentChapterNo = params.chapterNo + 1;
+    }
+
+    if (params.wakeCatForDeepSummary && this.threadCoordinator) {
+      await this.dispatchCopilotPrompt(
+        project,
+        this.buildCopilotSummarizeDispatchMessage(project, params.chapterNo, resolvedText),
+      );
+    }
+
+    this.store.saveBundle(project, bundle.canon, bundle.mechanics);
+    return this.mustLoad(params.projectId);
+  }
+
+  submitChapterSummary(params: {
+    projectId: string;
+    chapterNo: number;
+    summary: Omit<DistilledChapterSummary, 'chapterNo' | 'wordCount' | 'summarizedAt'> &
+      Partial<Pick<DistilledChapterSummary, 'wordCount' | 'summarizedAt'>>;
+    stateDelta?: ChapterStateDelta;
+    worldbuildingAdditions?: string[];
+    rollingSynopsisMarkdown?: string;
+  }): FullNovelProjectBundle {
+    const bundle = this.mustLoad(params.projectId);
+    const { project } = bundle;
+    const record = this.ensureChapterRecord(project, params.chapterNo);
+    const text = (record.finalText || record.humanizedDraft || record.rawDraft).trim();
+
+    const parsedSummary = distilledChapterSummarySchema.parse({
+      ...params.summary,
+      chapterNo: params.chapterNo,
+      wordCount: params.summary.wordCount ?? text.replace(/\s+/g, '').length,
+      summarizedAt: params.summary.summarizedAt ?? new Date().toISOString(),
+    });
+
+    record.title = parsedSummary.title;
+    record.distilledSummary = parsedSummary;
+    if (params.stateDelta) {
+      record.proposedStateDelta = chapterStateDeltaSchema.parse(params.stateDelta);
+    }
+    if (params.worldbuildingAdditions?.length) {
+      const baseDelta = record.proposedStateDelta ?? chapterStateDeltaSchema.parse({});
+      baseDelta.worldbuildingAdditions = [
+        ...new Set([...baseDelta.worldbuildingAdditions, ...params.worldbuildingAdditions]),
+      ];
+      record.proposedStateDelta = baseDelta;
+    }
+    record.stage = 'completed';
+    record.updatedAt = new Date().toISOString();
+
+    this.replaySnapshotsAndSynopsesFrom(bundle, params.chapterNo, params.rollingSynopsisMarkdown);
+    this.store.saveBundle(project, bundle.canon, bundle.mechanics);
+    return this.mustLoad(params.projectId);
+  }
+
+  restoreChapterVersion(projectId: string, chapterNo: number, versionId: string): FullNovelProjectBundle {
+    const bundle = this.mustLoad(projectId);
+    const record = this.mustChapterRecord(bundle.project, chapterNo);
+    const targetIdx = record.versionHistory.findIndex((v) => v.versionId === versionId);
+    if (targetIdx < 0) {
+      throw new Error(`Version ${versionId} not found in Chapter ${chapterNo}`);
+    }
+    const targetVersion = record.versionHistory[targetIdx];
+    if (!targetVersion) {
+      throw new Error(`Version ${versionId} invalid`);
+    }
+
+    this.archiveRecordIntoHistory(record, `切换回历史版本 ${versionId} 前自动留存`);
+    record.title = targetVersion.title;
+    record.rawDraft = targetVersion.content;
+    record.humanizedDraft = targetVersion.content;
+    record.finalText = targetVersion.content;
+    record.selectedDirection = targetVersion.directionUsed;
+    record.distilledSummary =
+      targetVersion.summary ??
+      buildDeterministicChapterSummary({
+        chapterNo,
+        title: targetVersion.title || undefined,
+        text: targetVersion.content,
+        canonBefore: this.loadCanonAtChapterStart(bundle, chapterNo),
+      });
+    record.proposedStateDelta = targetVersion.stateDelta;
+    record.stage = 'completed';
+    record.updatedAt = new Date().toISOString();
+
+    this.replaySnapshotsAndSynopsesFrom(bundle, chapterNo);
+    this.store.saveBundle(bundle.project, bundle.canon, bundle.mechanics);
+    return this.mustLoad(projectId);
+  }
+
+  private submitCopilotDraftInternal(
+    bundle: FullNovelProjectBundle,
+    params: {
+      projectId: string;
+      chapterNo: number;
+      authorCatId: string;
+      title?: string;
+      content: string;
+      proposedStateDelta?: ChapterStateDelta;
+    },
+  ): { record: ChapterStateRecord; aiFlavorScore: number; flagCount: number } {
+    const { project } = bundle;
+    const record = this.ensureChapterRecord(project, params.chapterNo);
+    const wasPaused = record.stage === 'paused';
+    const rawTrimmed = params.content.trim();
+    const cleaned = project.workflow.enableHumanizer ? lightPolishAiCliches(rawTrimmed) : rawTrimmed;
+    const parsedDelta = params.proposedStateDelta
+      ? chapterStateDeltaSchema.parse(params.proposedStateDelta)
+      : record.proposedStateDelta;
+
+    const canonBefore = this.loadCanonAtChapterStart(bundle, params.chapterNo);
+    const mechanicsBefore = this.loadMechanicsAtChapterStart(bundle, params.chapterNo);
+    const violations = verifyDraftContinuity({
+      draftText: cleaned,
+      graph: canonBefore,
+      mechanics: mechanicsBefore,
+      proposedDelta: parsedDelta,
+    });
+    const flavor = analyzeChineseAiFlavor(cleaned);
+
+    if (params.title?.trim()) {
+      record.title = params.title.trim();
+    }
+    record.rawDraft = rawTrimmed;
+    record.humanizedDraft = cleaned;
+    record.finalText = cleaned;
+    record.writerCatId = params.authorCatId;
+    record.proposedStateDelta = parsedDelta;
+    record.precheckWarnings = violations;
+    record.stage = wasPaused ? 'paused' : 'draft_ready';
+    record.updatedAt = new Date().toISOString();
+
+    this.store.saveBundle(project);
+    return {
+      record,
+      aiFlavorScore: flavor.aiFlavorScore,
+      flagCount: flavor.flags.length,
+    };
+  }
+
+  private ensureChapterRecord(project: NovelProject, chapterNo: number): ChapterStateRecord {
+    const existing = project.chapters[String(chapterNo)];
+    if (existing) return existing;
+    const created: ChapterStateRecord = {
+      chapterNo,
+      title: '',
+      stage: 'idle',
+      rewriteRound: 0,
+      authorSeedHint: '',
+      directionOptions: [],
+      versionHistory: [],
+      activeSkillSlugs: [],
+      precheckConstraintsMarkdown: '',
+      precheckWarnings: [],
+      ragPassages: [],
+      specialistNotes: '',
+      rawDraft: '',
+      humanizedDraft: '',
+      finalText: '',
+      qualityHistory: [],
+      authorNotes: '',
+      updatedAt: new Date().toISOString(),
+    };
+    project.chapters[String(chapterNo)] = created;
+    return created;
+  }
+
+  private archiveRecordIntoHistory(record: ChapterStateRecord, reason: string): void {
+    const content = (record.finalText || record.humanizedDraft || record.rawDraft).trim();
+    if (!content) return;
+    const latest = record.versionHistory[record.versionHistory.length - 1];
+    if (latest && latest.content === content && latest.title === record.title) return;
+
+    const snap: ChapterVersionSnapshot = {
+      versionId: `v${record.versionHistory.length + 1}-${nanoid(4).toLowerCase()}`,
+      createdAt: new Date().toISOString(),
+      reason,
+      title: record.title || record.distilledSummary?.title || '',
+      content,
+      directionUsed: record.selectedDirection,
+      summary: record.distilledSummary,
+      stateDelta: record.proposedStateDelta,
+    };
+    record.versionHistory = [...record.versionHistory.slice(-29), snap];
+  }
+
+  private applyBacktrackPreparation(
+    bundle: FullNovelProjectBundle,
+    chapterNo: number,
+    explicitMode?: BacktrackMode,
+  ): void {
+    const { project, mechanics } = bundle;
+    const current = project.chapters[String(chapterNo)];
+    const hasLaterContent = Object.values(project.chapters).some(
+      (ch) => ch.chapterNo > chapterNo && (ch.finalText || ch.humanizedDraft || ch.rawDraft).trim().length > 0,
+    );
+    const mode: BacktrackMode = explicitMode ?? 'in_place_bridge';
+
+    if (mode === 'rewind_truncate' && (hasLaterContent || (current && isChapterCompletedStage(current.stage)))) {
+      const archivedChapters = Object.values(project.chapters)
+        .filter((ch) => ch.chapterNo >= chapterNo && (ch.finalText || ch.humanizedDraft || ch.rawDraft).trim())
+        .sort((a, b) => a.chapterNo - b.chapterNo)
+        .map((ch) => ({
+          chapterNo: ch.chapterNo,
+          title: ch.title || ch.distilledSummary?.title || '',
+          finalText: (ch.finalText || ch.humanizedDraft || ch.rawDraft).trim(),
+          summary: ch.distilledSummary,
+        }));
+
+      if (archivedChapters.length > 0) {
+        const branch: ArchivedBranchRecord = {
+          branchId: `branch-${nanoid(6).toLowerCase()}`,
+          createdAt: new Date().toISOString(),
+          rewindFromChapterNo: chapterNo,
+          reason: `从第 ${chapterNo} 章回档重开新支线`,
+          chapters: archivedChapters,
+          previousRollingSynopsis: project.rollingSynopsisMarkdown,
+        };
+        project.archivedBranches = [...project.archivedBranches.slice(-29), branch];
+      }
+
+      if (current) {
+        this.archiveRecordIntoHistory(current, `从第 ${chapterNo} 章回档重开前留存`);
+        current.backtrackMode = 'rewind_truncate';
+        current.finalText = '';
+        current.humanizedDraft = '';
+        current.rawDraft = '';
+        current.distilledSummary = undefined;
+        current.continuityAlert = undefined;
+      }
+
+      for (const key of Object.keys(project.chapters)) {
+        if (Number(key) > chapterNo) delete project.chapters[key];
+      }
+      for (const key of Object.keys(mechanics.chapterSnapshots)) {
+        if (Number(key) >= chapterNo) delete mechanics.chapterSnapshots[key];
+      }
+      this.store.deleteCanonSnapshotsAfter(project.id, chapterNo - 1);
+
+      bundle.canon = this.loadCanonAtChapterStart(bundle, chapterNo);
+      bundle.mechanics = this.loadMechanicsAtChapterStart(bundle, chapterNo);
+      project.continuityAlerts = project.continuityAlerts.filter((a) => a.toChapterNo < chapterNo);
+      project.rollingSynopsisMarkdown = rebuildRollingSynopsisMarkdown(project);
+      return;
+    }
+
+    if (current) {
+      this.archiveRecordIntoHistory(current, '回溯重新生成本章前自动留档');
+      current.backtrackMode = hasLaterContent ? 'in_place_bridge' : undefined;
+    }
+  }
+
+  private loadCanonAtChapterStart(bundle: FullNovelProjectBundle, chapterNo: number): NarrativeGraph {
+    for (let target = chapterNo - 1; target >= 0; target--) {
+      const snap = this.store.loadCanonSnapshot(bundle.project.id, target);
+      if (snap) return snap;
+    }
+    return {
+      characters: [],
+      locations: [],
+      facts: [],
+      foreshadowings: [],
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  private loadMechanicsAtChapterStart(bundle: FullNovelProjectBundle, chapterNo: number): MechanicsLedger {
+    const cloned = structuredClone(bundle.mechanics);
+    for (let target = chapterNo - 1; target >= 0; target--) {
+      const snap = bundle.mechanics.chapterSnapshots[String(target)];
+      if (snap) {
+        cloned.entities = structuredClone(snap);
+        return cloned;
+      }
+    }
+    if (chapterNo === 1) return cloned;
+    cloned.entities = [];
+    return cloned;
+  }
+
+  private findMaxCompletedChapterNo(project: NovelProject): number {
+    let maxNo = 0;
+    for (const ch of Object.values(project.chapters)) {
+      if (isChapterCompletedStage(ch.stage) && ch.chapterNo > maxNo) {
+        maxNo = ch.chapterNo;
+      }
+    }
+    return maxNo;
+  }
+
+  private replaySnapshotsAndSynopsesFrom(
+    bundle: FullNovelProjectBundle,
+    fromChapterNo: number,
+    rollingSynopsisOverride?: string,
+  ): void {
+    const { project } = bundle;
+    let runningGraph = this.loadCanonAtChapterStart(bundle, fromChapterNo);
+    let runningMechanics = this.loadMechanicsAtChapterStart(bundle, fromChapterNo);
+
+    const sortedCompleted = Object.values(project.chapters)
+      .filter((ch) => ch.chapterNo >= fromChapterNo && isChapterCompletedStage(ch.stage))
+      .sort((a, b) => a.chapterNo - b.chapterNo);
+
+    for (const ch of sortedCompleted) {
+      const applied = applyCommittedChapterDelta({
+        chapterNo: ch.chapterNo,
+        graph: runningGraph,
+        mechanics: runningMechanics,
+        delta: ch.proposedStateDelta,
+      });
+      runningGraph = applied.nextGraph;
+      runningMechanics = applied.nextMechanics;
+      this.store.saveCanonSnapshot(project.id, ch.chapterNo, runningGraph);
+
+      const wbAdditions = [
+        ...(ch.distilledSummary?.newlyIntroducedSettings ?? []),
+        ...(ch.proposedStateDelta?.worldbuildingAdditions ?? []),
+      ];
+      project.accumulatedWorldbuildingMarkdown = mergeWorldbuildingMarkdown(
+        project.accumulatedWorldbuildingMarkdown,
+        ch.chapterNo,
+        wbAdditions,
+      );
+    }
+
+    bundle.canon = runningGraph;
+    bundle.mechanics = runningMechanics;
+    project.rollingSynopsisMarkdown = rollingSynopsisOverride?.trim() || rebuildRollingSynopsisMarkdown(project);
+
+    const alerts: ContinuityBridgeAlert[] = [];
+    const allChapters = Object.values(project.chapters).sort((a, b) => a.chapterNo - b.chapterNo);
+    for (const ch of allChapters) {
+      ch.continuityAlert = undefined;
+    }
+    for (const ch of allChapters) {
+      if (!isChapterCompletedStage(ch.stage)) continue;
+      const nextCh = project.chapters[String(ch.chapterNo + 1)];
+      const snapAfterCh = this.store.loadCanonSnapshot(project.id, ch.chapterNo) ?? runningGraph;
+      const alert = detectDownstreamContinuityAlert({
+        chapterK: ch,
+        chapterKPlus1: nextCh,
+        canonAfterK: snapAfterCh,
+        wasInPlaceRewrite: ch.chapterNo === fromChapterNo && ch.backtrackMode === 'in_place_bridge',
+      });
+      if (alert) {
+        alerts.push(alert);
+        if (nextCh) nextCh.continuityAlert = alert;
+      }
+    }
+    project.continuityAlerts = alerts;
+  }
+
+  private async dispatchCopilotPrompt(project: NovelProject, markdown: string): Promise<void> {
+    if (!this.threadCoordinator) return;
+    const targetCatId = project.copilotCatId || project.catRoster.writerCatId || 'kimi';
+    const threadId = await this.threadCoordinator.ensureEditorialThread({
+      existingThreadId: project.threadId,
+      title: `📖《${project.title}》小说共创室`,
+      catIds: [targetCatId],
+    });
+    if (!threadId) return;
+    project.threadId = threadId;
+    await this.threadCoordinator.dispatchToCat({
+      threadId,
+      targetCatId,
+      markdown,
+    });
+  }
+
+  private buildCopilotIdeationDispatchMessage(
+    project: NovelProject,
+    chapterNo: number,
+    packet: ChapterCopilotContextPacket,
+  ): string {
+    const catId = project.copilotCatId || 'kimi';
+    const lines = [
+      `@${catId} **【逐章共创 Step 1 · 请为《${project.title}》第 ${chapterNo} 章提出 5 个差异化推进方向与启发提问】**`,
+      `- **项目 ID**：\`${project.id}\` | **章节号**：\`${chapterNo}\``,
+      `- **作者主线大纲**：\n${packet.authorMasterOutlineMarkdown || '（作者尚未填写固定总纲，请结合前文自然延展）'}`,
+      packet.authorSeedHint ? `- **作者本章初步念头**：${packet.authorSeedHint}` : '',
+      packet.previousChapterEndingAnchor ? `- **紧接上章落点**：${packet.previousChapterEndingAnchor}` : '',
+      packet.downstreamBridge ? `\n${packet.downstreamBridge.bridgeInstructionMarkdown}\n` : '',
+      packet.referenceStyle.ideationStructuralBeats.length > 0
+        ? `- **参照小说脱敏冲突节拍参考（仅借结构张力，严禁搬运原书名词）**：已检索 ${packet.referenceStyle.ideationStructuralBeats.length} 组节拍`
+        : '',
+      '',
+      `请加载 \`novel-chapter-copilot\` 技能：`,
+      `1. 先调用 \`novel_read_project_context(projectId="${project.id}", chapterNo=${chapterNo})\` 完整阅读上文总结链、上章结尾原文切片与快照硬约束；`,
+      `2. 构思 **恰好 5 个截然不同的本章剧情推进方向**（覆盖正面冲突、悬念反转、人物关系博弈、关键设定揭示、蓄势伏笔等不同切口），每个方向都附带 1 句向作者发问的抉择问题（\`guidingQuestion\`）；`,
+      `3. 调用 \`novel_submit_chapter_directions(projectId="${project.id}", chapterNo=${chapterNo}, options=[...5项])\` 提交供作者拍板！`,
+    ];
+    return lines.filter(Boolean).join('\n');
+  }
+
+  private buildCopilotDraftDispatchMessage(
+    project: NovelProject,
+    chapterNo: number,
+    packet: ChapterCopilotContextPacket,
+  ): string {
+    const catId = project.copilotCatId || 'kimi';
+    const chosenTitles = packet.selectedOptionCards.map((c) => `【${c.title}】${c.pitch}`).join('\n  - ');
+    const customInput = packet.selectedDirection?.customAuthorInput || '';
+    const extraNotes = packet.selectedDirection?.chapterPromptNotes || '';
+    const lines = [
+      `@${catId} **【逐章共创 Step 2 · 请按作者选定思路撰写《${project.title}》第 ${chapterNo} 章正文】**`,
+      `- **项目 ID**：\`${project.id}\` | **章节号**：\`${chapterNo}\` | **目标字数**：约 ${packet.referenceStyle.targetWords} 字`,
+      chosenTitles ? `- **作者勾选的推进方向**：\n  - ${chosenTitles}` : '',
+      customInput ? `- **作者手写本章走向/回答**：${customInput}` : '',
+      extraNotes ? `- **本章附加细节要求**：${extraNotes}` : '',
+      packet.downstreamBridge ? `\n${packet.downstreamBridge.bridgeInstructionMarkdown}\n` : '',
+      `\n${packet.referenceStyle.styleInstructionMarkdown}`,
+      '',
+      `请加载 \`novel-chapter-copilot\` 技能：`,
+      `1. 调用 \`novel_read_project_context(projectId="${project.id}", chapterNo=${chapterNo})\` 核对第 ${chapterNo - 1} 章末尾原文切片与 \`Snapshot #${chapterNo - 1}\` 连续性硬约束（确保第一段无缝衔接上章结尾，若存在下章桥接约束则章末自然收束至第 ${chapterNo + 1} 章开场）；`,
+      `2. 严格模拟选定参照小说的句法节奏与五感质感（严禁出现 AI 五官套话与总结腔），完成正文后调用 \`novel_submit_chapter_draft(projectId="${project.id}", chapterNo=${chapterNo}, draftKind="copilot", title="...", content="...")\` 提交！`,
+    ];
+    return lines.filter(Boolean).join('\n');
+  }
+
+  private buildCopilotSummarizeDispatchMessage(project: NovelProject, chapterNo: number, finalText: string): string {
+    const catId = project.copilotCatId || 'kimi';
+    return [
+      `@${catId} **【逐章共创 Step 3 · 反向总结《${project.title}》第 ${chapterNo} 章大纲与活体设定增量】**`,
+      `- **项目 ID**：\`${project.id}\` | **章节号**：\`${chapterNo}\` | **定稿字数**：${finalText.length} 字`,
+      '',
+      `作者已确认定稿第 ${chapterNo} 章正文。请加载 \`novel-chapter-copilot\` 技能：`,
+      `1. 调用 \`novel_read_project_context(projectId="${project.id}", chapterNo=${chapterNo})\` 精读本章最终定稿正文 \`finalText\`；`,
+      `2. **100% 忠于定稿正文实际发生的内容**（含作者手改细节，严禁脑补），提炼总结式章纲（一句话梗概、关键事件链、人物变化、新登场设定词条、开篇与章末衔接锚点）及结构化 \`stateDelta\`（新角色/新地点/状态伤势/持有物/新埋或已回收伏笔）；`,
+      `3. 调用 \`novel_submit_chapter_summary\` 正式沉淀入库！`,
+    ].join('\n');
   }
 
   private buildChiefEditorDispatchMessage(

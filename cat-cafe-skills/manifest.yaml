@@ -1591,6 +1591,24 @@ skills:
     next: ["novel-chapter-writer", "novel-humanizer-zh", "novel-chief-coordinator"]
     sop_step: null
 
+  novel-chapter-copilot:
+    category: "小说工程"
+    description: >
+      人机共创逐章小说辅助核心技能：章前生成 5 个差异化推进方向与提问、按作者拍板与参照风格生成下一章正文、章后忠实反向总结大纲与沉淀设定。
+    triggers:
+      - "逐章共创"
+      - "生成5个方向"
+      - "下一章方向"
+      - "反向总结大纲"
+      - "回溯重写章节"
+      - "辅助写小说"
+    not_for:
+      - "越权覆盖作者手写主线大纲"
+      - "脱离前文一次性包办全书几十章细纲"
+    output: "5 组推进方向提问卡、无缝衔接前后文的章节初稿、以及忠于定稿正文的总结式章纲与设定增量"
+    next: ["novel-humanizer-zh", "novel-critic-gate"]
+    sop_step: null
+
   novel-humanizer-zh:
     category: "小说工程"
     description: >
@@ -1603,7 +1621,7 @@ skills:
     not_for:
       - "大改剧情走向或增删核心设定事实"
     output: "去 AI 味定稿正文（humanized）"
-    next: ["novel-chief-coordinator"]
+    next: ["novel-chapter-copilot", "novel-chief-coordinator"]
     sop_step: null
 
 # ─── 降级为 refs/（不再是独立 skill） ─────────────────

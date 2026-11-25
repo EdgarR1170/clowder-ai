@@ -38,6 +38,9 @@ export class NovelProjectStore {
     slug?: string;
     genre?: string;
     premise?: string;
+    authorMasterOutlineMarkdown?: string;
+    copilotCatId?: string;
+    styleConfig?: Partial<NovelProject['styleConfig']>;
     threadId?: string;
     enableMechanicsLedger?: boolean;
     catRoster?: Partial<NovelProject['catRoster']>;
@@ -47,8 +50,14 @@ export class NovelProjectStore {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '');
-    const slug = rawSlug.length >= 2 ? rawSlug.slice(0, 48) : `novel-${nanoid(6).toLowerCase()}`;
-    const id = `np-${slug}-${nanoid(5).toLowerCase()}`;
+    const safeSuffix = (n: number) =>
+      nanoid(n)
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, 'x');
+    const slug = rawSlug.length >= 2 ? rawSlug.slice(0, 48) : `novel-${safeSuffix(6)}`;
+    const id = `np-${slug}-${safeSuffix(5)}`;
+    const copilotCatId = input.copilotCatId?.trim() || input.catRoster?.writerCatId || 'kimi';
+    const initialOutline = input.authorMasterOutlineMarkdown?.trim() || input.premise?.trim() || '';
 
     const project = novelProjectSchema.parse({
       id,
@@ -57,7 +66,19 @@ export class NovelProjectStore {
       genre: input.genre?.trim() || '奇幻/长篇连载',
       premise: input.premise?.trim() || '',
       threadId: input.threadId,
-      worldBlueprintMarkdown: `# 《${input.title.trim()}》世界观与故事总蓝图\n\n## 核心卖点与一句话梗概\n${input.premise?.trim() || '待架构猫与作者共创填充'}\n`,
+      authorMasterOutlineMarkdown: initialOutline,
+      rollingSynopsisMarkdown: '',
+      accumulatedWorldbuildingMarkdown: '',
+      styleConfig: {
+        referenceBookIds: input.styleConfig?.referenceBookIds ?? [],
+        stylePreset: input.styleConfig?.stylePreset ?? '沉稳具象·强代入感',
+        customStyleGuidelines: input.styleConfig?.customStyleGuidelines ?? '',
+        targetWords: input.styleConfig?.targetWords ?? 3200,
+      },
+      copilotCatId,
+      archivedBranches: [],
+      continuityAlerts: [],
+      worldBlueprintMarkdown: `# 《${input.title.trim()}》世界观与故事总蓝图\n\n## 核心卖点与一句话梗概\n${input.premise?.trim() || '待作者输入主线构想并随章沉淀'}\n`,
       dimensionBindings: NOVEL_CRAFT_DIMENSIONS.map((dimension) => ({
         dimension,
         skillSlugs: [],
@@ -68,7 +89,7 @@ export class NovelProjectStore {
       catRoster: {
         chiefEditorCatId: input.catRoster?.chiefEditorCatId || 'opus',
         architectCatId: input.catRoster?.architectCatId || 'opus',
-        writerCatId: input.catRoster?.writerCatId || 'kimi',
+        writerCatId: input.catRoster?.writerCatId || copilotCatId,
         specialistCatId: input.catRoster?.specialistCatId || 'gemini',
         criticCatId: input.catRoster?.criticCatId || 'codex',
       },
@@ -123,6 +144,7 @@ export class NovelProjectStore {
     const dir = this.projectDir(project.id);
     mkdirSync(join(dir, 'chapters', 'raw'), { recursive: true });
     mkdirSync(join(dir, 'chapters', 'final'), { recursive: true });
+    mkdirSync(join(dir, 'chapters', 'history'), { recursive: true });
     mkdirSync(join(dir, 'snapshots'), { recursive: true });
 
     const updatedProject: NovelProject = {
@@ -133,6 +155,9 @@ export class NovelProjectStore {
 
     writeFileSync(join(dir, 'novel-project.json'), JSON.stringify(updatedProject, null, 2), 'utf8');
     writeFileSync(join(dir, 'world-blueprint.md'), updatedProject.worldBlueprintMarkdown, 'utf8');
+    writeFileSync(join(dir, 'author-master-outline.md'), updatedProject.authorMasterOutlineMarkdown, 'utf8');
+    writeFileSync(join(dir, 'rolling-synopsis.md'), updatedProject.rollingSynopsisMarkdown, 'utf8');
+    writeFileSync(join(dir, 'worldbuilding-notes.md'), updatedProject.accumulatedWorldbuildingMarkdown, 'utf8');
 
     for (const [chKey, chState] of Object.entries(updatedProject.chapters)) {
       const pad = String(chState.chapterNo).padStart(4, '0');
@@ -141,6 +166,13 @@ export class NovelProjectStore {
       }
       if (chState.finalText) {
         writeFileSync(join(dir, 'chapters', 'final', `ch-${pad}.md`), chState.finalText, 'utf8');
+      }
+      if ((chState.versionHistory?.length ?? 0) > 0) {
+        writeFileSync(
+          join(dir, 'chapters', 'history', `ch-${pad}-versions.json`),
+          JSON.stringify(chState.versionHistory, null, 2),
+          'utf8',
+        );
       }
       void chKey;
     }
@@ -220,6 +252,19 @@ export class NovelProjectStore {
     return true;
   }
 
+  deleteCanonSnapshotsAfter(projectId: string, maxKeepChapterNo: number): void {
+    const snapDir = join(this.projectDir(projectId), 'snapshots');
+    if (!existsSync(snapDir)) return;
+    for (const name of readdirSync(snapDir)) {
+      const m = name.match(/^canon-ch-(\d+)\.json$/);
+      if (!m) continue;
+      const no = Number(m[1]);
+      if (no > maxKeepChapterNo) {
+        rmSync(join(snapDir, name), { force: true });
+      }
+    }
+  }
+
   exportManuscript(projectId: string, format: 'md' | 'txt' = 'md'): { fileName: string; content: string } {
     const bundle = this.loadBundle(projectId);
     if (!bundle) throw new Error(`Novel project not found: ${projectId}`);
@@ -239,7 +284,8 @@ export class NovelProjectStore {
 
     for (const ch of committedChapters) {
       const outline = outlinesByNo.get(ch.chapterNo);
-      const heading = `第${ch.chapterNo}章 ${outline?.title ?? ''}`.trim();
+      const chTitle = (ch.title || ch.distilledSummary?.title || outline?.title || '').trim();
+      const heading = `第${ch.chapterNo}章 ${chTitle}`.trim();
       const body = (ch.finalText || ch.humanizedDraft || ch.rawDraft).trim();
       blocks.push(format === 'md' ? `## ${heading}\n\n${body}\n` : `${heading}\n\n${body}\n\n`);
     }

@@ -1,6 +1,11 @@
 import type {
+  BacktrackMode,
+  ChapterDirectionOption,
   ChapterOutline,
+  ChapterStateDelta,
+  ChapterStateRecord,
   DimensionSkillBinding,
+  DistilledChapterSummary,
   DistilledCraftSkill,
   EditorialCatRosterBinding,
   MechanicsLedger,
@@ -11,6 +16,7 @@ import type {
   ReferenceBookSummary,
   RetrievedBeatPassage,
   StoryArc,
+  StyleReferenceConfig,
 } from '@cat-cafe/shared';
 import { apiFetch } from '@/utils/api-client';
 
@@ -154,6 +160,9 @@ export const novelStudioApi = {
     title: string;
     genre?: string;
     premise?: string;
+    authorMasterOutlineMarkdown?: string;
+    copilotCatId?: string;
+    styleConfig?: Partial<StyleReferenceConfig>;
     enableMechanicsLedger?: boolean;
     catRoster?: Partial<EditorialCatRosterBinding>;
     createEditorialThread?: boolean;
@@ -171,6 +180,125 @@ export const novelStudioApi = {
       method: 'DELETE',
     }),
 
+  // ── Human-in-the-Loop Chapter Co-Pilot Endpoints ─────────────────────────
+  updateMasterOutlineAndStyle: (
+    projectId: string,
+    input: {
+      title?: string;
+      genre?: string;
+      premise?: string;
+      authorMasterOutlineMarkdown?: string;
+      styleConfig?: Partial<StyleReferenceConfig>;
+      copilotCatId?: string;
+      enableMechanicsLedger?: boolean;
+    },
+  ) =>
+    jsonRequest<{ project: NovelProject; bundle: NovelProjectBundleDto }>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/master-outline`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      },
+    ),
+
+  ideateChapterDirections: (
+    projectId: string,
+    chapterNo: number,
+    input: {
+      authorSeedHint?: string;
+      backtrackMode?: BacktrackMode;
+      wakeCat?: boolean;
+    } = {},
+  ) =>
+    jsonRequest<{
+      project: NovelProject;
+      chapterRecord: ChapterStateRecord;
+      bundle: NovelProjectBundleDto;
+    }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/ideate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  generateChapterFromChoice: (
+    projectId: string,
+    chapterNo: number,
+    input: {
+      selectedOptionIds?: string[];
+      customAuthorInput?: string;
+      chapterPromptNotes?: string;
+      backtrackMode?: BacktrackMode;
+      wakeCat?: boolean;
+    },
+  ) =>
+    jsonRequest<{
+      project: NovelProject;
+      chapterRecord: ChapterStateRecord;
+      bundle: NovelProjectBundleDto;
+    }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/generate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  saveManualDraft: (
+    projectId: string,
+    chapterNo: number,
+    input: { title?: string; content: string; authorNotes?: string },
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/draft`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      },
+    ),
+
+  finalizeChapter: (
+    projectId: string,
+    chapterNo: number,
+    input: {
+      title?: string;
+      finalTextOverride?: string;
+      stateDeltaOverride?: ChapterStateDelta;
+      authorNotes?: string;
+      wakeCatForDeepSummary?: boolean;
+    } = {},
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/finalize`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+
+  updateChapterSummary: (
+    projectId: string,
+    chapterNo: number,
+    input: {
+      summary: Omit<DistilledChapterSummary, 'chapterNo' | 'wordCount' | 'summarizedAt'>;
+      stateDelta?: ChapterStateDelta;
+      worldbuildingAdditions?: string[];
+      rollingSynopsisMarkdown?: string;
+    },
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/summary`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      },
+    ),
+
+  restoreChapterVersion: (projectId: string, chapterNo: number, versionId: string) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/restore-version`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ versionId }),
+      },
+    ),
+
+  // ── Legacy / Shared Endpoints ────────────────────────────────────────────
   updateMatrix: (projectId: string, dimensionBindings: DimensionSkillBinding[]) =>
     jsonRequest<{ project: NovelProject }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/matrix`, {
       method: 'PUT',
@@ -221,15 +349,6 @@ export const novelStudioApi = {
       body: JSON.stringify({}),
     }),
 
-  triggerAiPlan: (projectId: string, directionPrompt: string, targetChapterCount: number) =>
-    jsonRequest<{ queued: boolean; threadId: string; targetCatId: string }>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/ai-plan`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ directionPrompt, targetChapterCount }),
-      },
-    ),
-
   saveCanon: (projectId: string, canon: NarrativeGraph) =>
     jsonRequest<{ canon: NarrativeGraph }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/canon`, {
       method: 'PUT',
@@ -245,28 +364,6 @@ export const novelStudioApi = {
       },
     ),
 
-  startChapter: (projectId: string, chapterNo: number, wakeCatsInThread = true, resetExistingDraft = false) =>
-    jsonRequest<{ bundle: NovelProjectBundleDto }>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/start`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ wakeCatsInThread, resetExistingDraft }),
-      },
-    ),
-
-  approveChapter: (
-    projectId: string,
-    chapterNo: number,
-    input: { finalTextOverride?: string; authorNotes?: string; wakeNextChapter?: boolean },
-  ) =>
-    jsonRequest<NovelProjectBundleDto>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/approve`,
-      {
-        method: 'POST',
-        body: JSON.stringify(input),
-      },
-    ),
-
   requestChapterRewrite: (projectId: string, chapterNo: number, feedback: string) =>
     jsonRequest<NovelProjectBundleDto>(
       `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/request-rewrite`,
@@ -276,29 +373,11 @@ export const novelStudioApi = {
       },
     ),
 
-  rollbackToChapter: (projectId: string, targetChapterNo: number) =>
-    jsonRequest<NovelProjectBundleDto>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/rollback`, {
-      method: 'POST',
-      body: JSON.stringify({ targetChapterNo }),
-    }),
-
-  toggleAutoContinuous: (
-    projectId: string,
-    enabled: boolean,
-    maxChapters?: number,
-    startFromChapterNo?: number,
-    resetStartChapterDraft = false,
-  ) =>
-    jsonRequest<{ project: NovelProject }>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/auto-continuous`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ enabled, maxChapters, startFromChapterNo, resetStartChapterDraft }),
-      },
-    ),
-
   exportManuscript: (projectId: string, format: 'md' | 'txt') =>
     jsonRequest<{ fileName: string; content: string }>(
       `/api/novel-studio/projects/${encodeURIComponent(projectId)}/export?format=${format}`,
     ),
+
+  // Unused dummy export to keep type imports warm if needed
+  _types: undefined as unknown as ChapterDirectionOption | undefined,
 };

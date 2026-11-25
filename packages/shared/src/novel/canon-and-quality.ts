@@ -132,6 +132,7 @@ export const chapterStateDeltaSchema = z.object({
     )
     .default([]),
   newCharacters: z.array(characterNodeSchema).default([]),
+  newLocations: z.array(locationNodeSchema).default([]),
   locationUpdates: z
     .array(
       z.object({
@@ -144,6 +145,7 @@ export const chapterStateDeltaSchema = z.object({
   newFacts: z.array(narrativeFactSchema).default([]),
   plantedForeshadowings: z.array(foreshadowingItemSchema).default([]),
   resolvedForeshadowingIds: z.array(z.string()).default([]),
+  worldbuildingAdditions: z.array(z.string().min(1).max(400)).max(30).default([]),
   mechanicsStatChanges: z
     .array(
       z.object({
@@ -159,6 +161,17 @@ export const chapterStateDeltaSchema = z.object({
 });
 
 export type ChapterStateDelta = z.infer<typeof chapterStateDeltaSchema>;
+
+export const continuityBridgeAlertSchema = z.object({
+  fromChapterNo: z.number().int().min(1),
+  toChapterNo: z.number().int().min(2),
+  severity: z.enum(['warn', 'conflict']),
+  summary: z.string().min(1).max(400),
+  details: z.array(z.string().min(1).max(400)).max(20).default([]),
+  detectedAt: z.string(),
+});
+
+export type ContinuityBridgeAlert = z.infer<typeof continuityBridgeAlertSchema>;
 
 export const invariantViolationSchema = z.object({
   severity: z.enum(['blocker', 'warn']),

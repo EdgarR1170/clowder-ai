@@ -1,39 +1,37 @@
 id: novel-creation
 domain: creative-writing
-label: Clowder Novel Multi-Agent Creation SOP
-description: 多书分维拆解（Book-to-Skill + 向量RAG）与多猫编辑部逐章协调创作标准流程
+label: Clowder Novel Human-Guided Chapter Co-Pilot SOP
+description: 作者主导主线大纲、章前 5 方向提问拍板、参照小说文风模拟、章后反向沉淀总结大纲与设定、以及任意章节双模式回溯衔接标准流程
 stages:
-  - id: dissect_books
-    label: 多书分维拆解与技法蒸馏
+  - id: style_reference_ingest
+    label: 参照小说入库与文风画像提取
     suggested_skill: novel-book-dissector
     hard_rules:
-      - id: novel-no-plot-copy
-        text: 拆书产物必须是可迁移的技法框架、If-Then决策规则与反模式，禁止提取原书人名地名与剧情梗概。
+      - id: novel-reference-style-boundary
+        text: 参照小说仅用于下一章生成前的 5 方向冲突节拍启发与单章句法文风模拟，严禁搬运原书人名地名设定或篡改作者主线大纲。
         severity: blocker
     pitfalls: []
-  - id: blueprint_and_arcs
-    label: 世界观蓝图与分层章纲
-    suggested_skill: novel-chief-coordinator
-    hard_rules: []
-    pitfalls: []
-  - id: chapter_drafting
-    label: 动态挂载技法与正文执笔
-    suggested_skill: novel-chapter-writer
+  - id: pre_chapter_5_directions
+    label: 章前上下文组装与 5 方向提问提案
+    suggested_skill: novel-chapter-copilot
     hard_rules:
-      - id: novel-precheck-before-draft
-        text: 执笔前必须先运行 novel_precheck_chapter 读取角色生死、知情边界与数值面板硬约束。
+      - id: novel-snapshot-isolation
+        text: 构思第 K 章方向时必须严格读取第 K-1 章末设定快照与前文总结链；若为保留后文的回溯重写，必须同时满足第 K+1 章开头衔接锚点。
         severity: blocker
     pitfalls: []
-  - id: cross_cat_review
-    label: 异构模型五轴审校与防穿帮
-    suggested_skill: novel-critic-gate
+  - id: guided_chapter_drafting
+    label: 按作者选定思路与参照文风生成正文
+    suggested_skill: novel-chapter-copilot
     hard_rules:
-      - id: novel-no-self-review
-        text: 严禁执笔猫自审本章初稿，必须由不同 catId 的独立审校猫调用 novel_evaluate_chapter 完成五轴评分。
+      - id: novel-seamless-upstream-bridge
+        text: 新章节开篇必须无缝紧接上一章结尾切片与人物伤势持有物状态，禁止出现死人复活或知情权越界穿帮。
         severity: blocker
     pitfalls: []
-  - id: humanize_and_commit
-    label: 去AI味精修与状态账本入库
-    suggested_skill: novel-humanizer-zh
-    hard_rules: []
+  - id: finalize_and_reverse_distill
+    label: 作者审阅定稿与反向总结沉淀大纲设定
+    suggested_skill: novel-chapter-copilot
+    hard_rules:
+      - id: novel-faithful-reverse-summary
+        text: 章后生成的总结式大纲与设定增量必须 100% 忠于作者确认定稿后的最终正文，严禁覆盖作者手写主线大纲。
+        severity: blocker
     pitfalls: []

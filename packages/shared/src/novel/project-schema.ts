@@ -1,6 +1,109 @@
 import { z } from 'zod';
-import { chapterQualityReportSchema, chapterStateDeltaSchema, invariantViolationSchema } from './canon-and-quality.js';
+import {
+  chapterQualityReportSchema,
+  chapterStateDeltaSchema,
+  continuityBridgeAlertSchema,
+  invariantViolationSchema,
+} from './canon-and-quality.js';
 import { novelCraftDimensionSchema } from './craft-dimensions.js';
+
+export const styleReferenceConfigSchema = z.object({
+  referenceBookIds: z.array(z.string().min(1).max(80)).max(6).default([]),
+  stylePreset: z.string().max(120).default('沉稳具象·强代入感'),
+  customStyleGuidelines: z.string().max(2000).default(''),
+  targetWords: z.number().int().min(500).max(15000).default(3200),
+});
+
+export type StyleReferenceConfig = z.infer<typeof styleReferenceConfigSchema>;
+
+export const DIRECTION_FOCUS_TYPES = [
+  'conflict_escalation',
+  'suspense_twist',
+  'character_bond',
+  'world_revelation',
+  'pacing_transition',
+] as const;
+
+export type DirectionFocusType = (typeof DIRECTION_FOCUS_TYPES)[number];
+export const directionFocusTypeSchema = z.enum(DIRECTION_FOCUS_TYPES);
+
+export const DIRECTION_FOCUS_LABELS: Readonly<Record<DirectionFocusType, string>> = {
+  conflict_escalation: '正面冲突推进',
+  suspense_twist: '悬念反客为主',
+  character_bond: '人物博弈拉扯',
+  world_revelation: '关键设定揭示',
+  pacing_transition: '蓄势伏笔转折',
+};
+
+export const chapterDirectionOptionSchema = z.object({
+  optionId: z.string().min(1).max(40),
+  title: z.string().min(1).max(120),
+  focusType: directionFocusTypeSchema.default('conflict_escalation'),
+  pitch: z.string().min(1).max(800),
+  openingBeat: z.string().max(400).default(''),
+  endingHook: z.string().max(400).default(''),
+  guidingQuestion: z.string().min(1).max(400),
+});
+
+export type ChapterDirectionOption = z.infer<typeof chapterDirectionOptionSchema>;
+
+export const authorDirectionSelectionSchema = z.object({
+  selectedOptionIds: z.array(z.string().min(1).max(40)).max(5).default([]),
+  customAuthorInput: z.string().max(4000).default(''),
+  chapterPromptNotes: z.string().max(2000).default(''),
+  decidedAt: z.string(),
+});
+
+export type AuthorDirectionSelection = z.infer<typeof authorDirectionSelectionSchema>;
+
+export const distilledChapterSummarySchema = z.object({
+  chapterNo: z.number().int().min(1),
+  title: z.string().min(1).max(120),
+  oneLineSummary: z.string().min(1).max(500),
+  keyEvents: z.array(z.string().min(1).max(300)).max(12).default([]),
+  characterChanges: z.array(z.string().min(1).max(300)).max(12).default([]),
+  newlyIntroducedSettings: z.array(z.string().min(1).max(300)).max(16).default([]),
+  openingAnchor: z.string().max(500).default(''),
+  endingAnchor: z.string().max(500).default(''),
+  wordCount: z.number().int().min(0).default(0),
+  summarizedAt: z.string(),
+});
+
+export type DistilledChapterSummary = z.infer<typeof distilledChapterSummarySchema>;
+
+export const backtrackModeSchema = z.enum(['in_place_bridge', 'rewind_truncate']);
+export type BacktrackMode = z.infer<typeof backtrackModeSchema>;
+
+export const chapterVersionSnapshotSchema = z.object({
+  versionId: z.string().min(1).max(60),
+  createdAt: z.string(),
+  reason: z.string().max(200).default('回溯重生成自动留档'),
+  title: z.string().max(120).default(''),
+  content: z.string(),
+  directionUsed: authorDirectionSelectionSchema.optional(),
+  summary: distilledChapterSummarySchema.optional(),
+  stateDelta: chapterStateDeltaSchema.optional(),
+});
+
+export type ChapterVersionSnapshot = z.infer<typeof chapterVersionSnapshotSchema>;
+
+export const archivedBranchChapterSchema = z.object({
+  chapterNo: z.number().int().min(1),
+  title: z.string().max(120).default(''),
+  finalText: z.string().default(''),
+  summary: distilledChapterSummarySchema.optional(),
+});
+
+export const archivedBranchRecordSchema = z.object({
+  branchId: z.string().min(1).max(60),
+  createdAt: z.string(),
+  rewindFromChapterNo: z.number().int().min(1),
+  reason: z.string().max(240).default('回档重开新支线'),
+  chapters: z.array(archivedBranchChapterSchema).default([]),
+  previousRollingSynopsis: z.string().default(''),
+});
+
+export type ArchivedBranchRecord = z.infer<typeof archivedBranchRecordSchema>;
 
 export const dimensionSkillBindingSchema = z.object({
   dimension: novelCraftDimensionSchema,
@@ -80,6 +183,12 @@ export const storyArcSchema = z.object({
 export type StoryArc = z.infer<typeof storyArcSchema>;
 
 export const CHAPTER_STAGES = [
+  'idle',
+  'ideating',
+  'awaiting_choice',
+  'draft_ready',
+  'summarizing',
+  'completed',
   'planned',
   'paused',
   'prechecking',
@@ -93,6 +202,10 @@ export const CHAPTER_STAGES = [
 
 export type ChapterStage = (typeof CHAPTER_STAGES)[number];
 export const chapterStageSchema = z.enum(CHAPTER_STAGES);
+
+export function isChapterCompletedStage(stage: ChapterStage | undefined): boolean {
+  return stage === 'completed' || stage === 'committed';
+}
 
 export const retrievedBeatPassageSchema = z.object({
   chunkId: z.string(),
@@ -109,8 +222,16 @@ export type RetrievedBeatPassage = z.infer<typeof retrievedBeatPassageSchema>;
 
 export const chapterStateRecordSchema = z.object({
   chapterNo: z.number().int().min(1),
-  stage: chapterStageSchema.default('planned'),
+  title: z.string().max(120).default(''),
+  stage: chapterStageSchema.default('idle'),
   rewriteRound: z.number().int().min(0).default(0),
+  authorSeedHint: z.string().max(2000).default(''),
+  backtrackMode: backtrackModeSchema.optional(),
+  directionOptions: z.array(chapterDirectionOptionSchema).max(5).default([]),
+  selectedDirection: authorDirectionSelectionSchema.optional(),
+  distilledSummary: distilledChapterSummarySchema.optional(),
+  versionHistory: z.array(chapterVersionSnapshotSchema).max(30).default([]),
+  continuityAlert: continuityBridgeAlertSchema.optional(),
   activeSkillSlugs: z.array(z.string()).default([]),
   precheckConstraintsMarkdown: z.string().default(''),
   precheckWarnings: z.array(invariantViolationSchema).default([]),
@@ -140,6 +261,13 @@ export const novelProjectSchema = z.object({
   genre: z.string().max(80).default('玄幻/奇幻'),
   premise: z.string().max(2000).default(''),
   threadId: z.string().optional(),
+  authorMasterOutlineMarkdown: z.string().default(''),
+  rollingSynopsisMarkdown: z.string().default(''),
+  accumulatedWorldbuildingMarkdown: z.string().default(''),
+  styleConfig: styleReferenceConfigSchema.default({}),
+  copilotCatId: z.string().min(1).max(80).default('kimi'),
+  archivedBranches: z.array(archivedBranchRecordSchema).max(30).default([]),
+  continuityAlerts: z.array(continuityBridgeAlertSchema).max(50).default([]),
   worldBlueprintMarkdown: z.string().default(''),
   dimensionBindings: z.array(dimensionSkillBindingSchema).default([]),
   catRoster: editorialCatRosterBindingSchema.default({}),
