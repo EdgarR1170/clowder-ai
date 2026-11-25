@@ -92,6 +92,22 @@ function observedQuotaRemaining(catId: string): { remainingPercent: number; rese
  * Returns null when the member may be dispatched.
  */
 export function describeMemberQuotaBlock(catId: string): { message: string; blockedUntil: number } | null {
+  const status = describeMemberQuotaStatus(catId);
+  if (status.available) return null;
+  return { blockedUntil: status.blockedUntil ?? Date.now(), message: status.message ?? '' };
+}
+
+/** Operator-facing snapshot of one member's quota state. */
+export interface MemberQuotaStatus {
+  readonly catId: string;
+  readonly available: boolean;
+  readonly blockedUntil?: number;
+  readonly message?: string;
+  readonly observed?: { remainingPercent: number; resetsAt?: string };
+}
+
+/** Describe a member's quota state without mutating it beyond recording an observed exhaustion. */
+export function describeMemberQuotaStatus(catId: string): MemberQuotaStatus {
   const now = Date.now();
   const block = blocks.get(catId);
   if (block) {
@@ -99,6 +115,8 @@ export function describeMemberQuotaBlock(catId: string): { message: string; bloc
       blocks.delete(catId);
     } else {
       return {
+        catId,
+        available: false,
         blockedUntil: block.blockedUntil,
         message: `@${catId}（${memberLabel(catId)}）额度已用尽，预计 ${formatClock(block.blockedUntil)} 后恢复；请换一只猫或稍后重试。`,
       };
@@ -106,8 +124,8 @@ export function describeMemberQuotaBlock(catId: string): { message: string; bloc
   }
   const observed = observedQuotaRemaining(catId);
   if (observed && observed.remainingPercent <= 0) {
-    const until = observed.resetsAt ? Date.parse(observed.resetsAt) : now + windowFor(catId);
-    const blockedUntil = Number.isFinite(until) ? until : now + windowFor(catId);
+    const parsed = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
+    const blockedUntil = Number.isFinite(parsed) ? parsed : now + windowFor(catId);
     blocks.set(catId, {
       catId,
       reason: 'observed_quota_exhausted',
@@ -116,9 +134,12 @@ export function describeMemberQuotaBlock(catId: string): { message: string; bloc
       detail: observed.resetsAt,
     });
     return {
+      catId,
+      available: false,
       blockedUntil,
       message: `@${catId}（${memberLabel(catId)}）额度已用尽，预计 ${formatClock(blockedUntil)} 后恢复；请换一只猫或稍后重试。`,
+      observed,
     };
   }
-  return null;
+  return { catId, available: true, ...(observed ? { observed } : {}) };
 }

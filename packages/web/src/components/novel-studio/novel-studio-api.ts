@@ -21,6 +21,17 @@ export interface CatSummaryItem {
   roleDescription?: string;
 }
 
+/** Quota state the studio shows next to each editorial seat before dispatching. */
+export interface NovelMemberQuotaItem {
+  catId: string;
+  name: string;
+  displayName: string;
+  available: boolean;
+  blockedUntil?: number;
+  message?: string;
+  observed?: { remainingPercent: number; resetsAt?: string };
+}
+
 export interface NovelEmbedderConfigDto {
   provider: 'auto' | 'clowder-local' | 'openai-compatible' | 'local-hash-vec' | 'fts-only';
   apiUrl?: string;
@@ -73,6 +84,8 @@ export function fileToBase64(file: File): Promise<string> {
 
 export const novelStudioApi = {
   fetchOverview: () => jsonRequest<NovelOverviewResponse>('/api/novel-studio/overview'),
+
+  fetchMemberQuota: () => jsonRequest<{ members: NovelMemberQuotaItem[] }>('/api/novel-studio/members/quota'),
 
   updateEmbeddingConfig: (config: Partial<NovelEmbedderConfigDto>) =>
     jsonRequest<{ embeddingConfig: NovelEmbedderConfigDto }>('/api/novel-studio/embedding-config', {

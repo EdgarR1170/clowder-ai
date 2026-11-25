@@ -10,7 +10,7 @@ import {
 } from '@cat-cafe/shared';
 import { type FC, useEffect, useState } from 'react';
 import { MatrixIcon, SparklesIcon } from './NovelIcons';
-import { type CatSummaryItem, novelStudioApi } from './novel-studio-api';
+import { type CatSummaryItem, type NovelMemberQuotaItem, novelStudioApi } from './novel-studio-api';
 
 interface SkillMatrixPanelProps {
   project: NovelProject;
@@ -27,6 +27,23 @@ export const SkillMatrixPanel: FC<SkillMatrixPanelProps> = ({ project, books, sk
   const [inspectSlug, setInspectSlug] = useState<string>('');
   const [inspectMarkdown, setInspectMarkdown] = useState<string>('');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [quotaByCat, setQuotaByCat] = useState<Record<string, NovelMemberQuotaItem>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    novelStudioApi
+      .fetchMemberQuota()
+      .then((res) => {
+        if (cancelled) return;
+        setQuotaByCat(Object.fromEntries(res.members.map((member) => [member.catId, member])));
+      })
+      .catch(() => {
+        /* quota is advisory; a failed probe must not block the roster editor */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     setBindings(project.dimensionBindings);
@@ -144,6 +161,17 @@ export const SkillMatrixPanel: FC<SkillMatrixPanelProps> = ({ project, books, sk
                   </option>
                 ))}
               </select>
+              {quotaByCat[roster[field]] && !quotaByCat[roster[field]].available && (
+                <p className="mt-1 text-[11px] leading-tight" style={{ color: 'var(--semantic-critical)' }}>
+                  冷却中 · 预计{' '}
+                  {quotaByCat[roster[field]].blockedUntil
+                    ? new Date(quotaByCat[roster[field]].blockedUntil as number).toLocaleString('zh-CN', {
+                        hour12: false,
+                      })
+                    : '稍后'}{' '}
+                  恢复
+                </p>
+              )}
             </div>
           ))}
         </div>

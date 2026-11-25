@@ -19,7 +19,10 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
-import { describeMemberQuotaBlock } from '../domains/cats/services/agents/invocation/member-quota-cooldown.js';
+import {
+  describeMemberQuotaBlock,
+  describeMemberQuotaStatus,
+} from '../domains/cats/services/agents/invocation/member-quota-cooldown.js';
 import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
 import type { AnyMessageStore } from '../domains/cats/services/stores/factories/MessageStoreFactory.js';
 import type { IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
@@ -425,6 +428,28 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
     } catch (err) {
       return sendError(reply, err);
     }
+  });
+
+  /**
+   * Quota state of every member the studio may dispatch to. The console shows this before a
+   * dispatch so an exhausted Kimi window is visible as "cooling down until ..." instead of
+   * surfacing only as a CLI exit after a two-minute turn.
+   */
+  app.get('/api/novel-studio/members/quota', async () => {
+    const members = collectRegisteredRosterCandidates().map((candidate) => {
+      const status = describeMemberQuotaStatus(candidate.id);
+      const config = catRegistry.tryGet(candidate.id)?.config;
+      return {
+        catId: candidate.id,
+        name: config?.name ?? candidate.id,
+        displayName: config?.displayName ?? config?.name ?? candidate.id,
+        available: status.available,
+        ...(status.blockedUntil ? { blockedUntil: status.blockedUntil } : {}),
+        ...(status.message ? { message: status.message } : {}),
+        ...(status.observed ? { observed: status.observed } : {}),
+      };
+    });
+    return { members };
   });
 
   app.get('/api/novel-studio/projects', async () => ({
