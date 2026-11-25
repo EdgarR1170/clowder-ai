@@ -225,9 +225,7 @@ async function bootV2() {
       return { id: p.form.catId || 'dsh' };
     },
   };
-  const action = vi.fn(async (name: string, args: Record<string, string>, _element?: HTMLElement) =>
-    actionHandlers[name]?.(args),
-  );
+  const action = vi.fn(async (name: string, args: Record<string, string>) => actionHandlers[name]?.(args));
 
   let input = fixtureInput(data) as Record<string, unknown>;
   const port = {

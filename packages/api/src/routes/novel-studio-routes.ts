@@ -22,6 +22,11 @@ import type { InvocationTracker } from '../domains/cats/services/agents/invocati
 import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
 import type { AnyMessageStore } from '../domains/cats/services/stores/factories/MessageStoreFactory.js';
 import type { IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
+import {
+  collectRegisteredRosterCandidates,
+  resolveEditorialCatRoster,
+} from '../domains/novel-studio/coordinator/editorial-roster.js';
+import { resolveEditorialThreadWorkspace } from '../domains/novel-studio/coordinator/editorial-thread-workspace.js';
 import type { NovelStudioRuntime, ThreadCoordinatorPort } from '../domains/novel-studio/index.js';
 import { isDirectLoopbackRequest } from '../utils/loopback-request.js';
 import { resolveUserId } from '../utils/request-identity.js';
@@ -421,15 +426,26 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
         })
         .parse(request.body);
 
+      const catRoster = resolveEditorialCatRoster({
+        requested: body.catRoster,
+        candidates: collectRegisteredRosterCandidates(),
+      });
+
       let threadId: string | undefined;
       if (body.createEditorialThread && opts.threadStore) {
         const userId = resolveOperatorId(request, fallbackUser) ?? fallbackUser;
-        const createdThread = await opts.threadStore.create(userId, `📖《${body.title.trim()}》多猫编辑部`);
+        // Kimi/Codex/Claude members need a real cwd; a 'default' thread can never wake them.
+        const workspace = await resolveEditorialThreadWorkspace(body.title);
+        const createdThread = await opts.threadStore.create(
+          userId,
+          `📖《${body.title.trim()}》多猫编辑部`,
+          workspace ?? undefined,
+        );
         const cats = [
-          body.catRoster?.chiefEditorCatId ?? 'opus',
-          body.catRoster?.writerCatId ?? 'kimi',
-          body.catRoster?.specialistCatId ?? 'gemini',
-          body.catRoster?.criticCatId ?? 'codex',
+          catRoster.chiefEditorCatId,
+          catRoster.writerCatId,
+          catRoster.specialistCatId,
+          catRoster.criticCatId,
         ];
         try {
           await opts.threadStore.addParticipants(createdThread.id, [...new Set(cats)] as never[]);
@@ -441,6 +457,7 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
 
       const bundle = runtime.projectStore.createProject({
         ...body,
+        catRoster,
         threadId,
       });
       return bundle;
