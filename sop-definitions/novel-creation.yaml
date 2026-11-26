@@ -1,37 +1,37 @@
 id: novel-creation
 domain: creative-writing
-label: Clowder Novel Human-Guided Chapter Co-Pilot SOP
-description: 作者主导主线大纲、章前 5 方向提问拍板、参照小说文风模拟、章后反向沉淀总结大纲与设定、以及任意章节双模式回溯衔接标准流程
+label: Clowder Novel 0-7 Guided Multi-Cat Creation SOP
+description: 风格库导入 → 创建小说 → 6模块分别选参照小说 → 设定+前三章多猫拆解 → 5大纲→5细纲→生成正文 → 人工建议调整 → 去AI味优化 → 最终成品编辑
 stages:
-  - id: style_reference_ingest
-    label: 参照小说入库与文风画像提取
+  - id: module_reference_selection
+    label: 导入参考书并按 6 大模块选择参照风格
     suggested_skill: novel-book-dissector
     hard_rules:
-      - id: novel-reference-style-boundary
-        text: 参照小说仅用于下一章生成前的 5 方向冲突节拍启发与单章句法文风模拟，严禁搬运原书人名地名设定或篡改作者主线大纲。
+      - id: novel-no-verbatim-plagiarism
+        text: 各模块参照小说仅提取可迁移叙事节拍、分镜框架与句法节奏，严禁搬运原书人名地名与专有设定。
         severity: blocker
     pitfalls: []
-  - id: pre_chapter_5_directions
-    label: 章前上下文组装与 5 方向提问提案
+  - id: onboarding_dissection
+    label: 设定与前三章多猫拆解分析
     suggested_skill: novel-chapter-copilot
     hard_rules:
-      - id: novel-snapshot-isolation
-        text: 构思第 K 章方向时必须严格读取第 K-1 章末设定快照与前文总结链；若为保留后文的回溯重写，必须同时满足第 K+1 章开头衔接锚点。
+      - id: novel-preserve-seed-chapters
+        text: 必须忠实保留并解析用户粘贴的前三章原文与人物伏笔状态，提取作者本人原生文风作为后续生章与去AI味标尺。
         severity: blocker
     pitfalls: []
-  - id: guided_chapter_drafting
-    label: 按作者选定思路与参照文风生成正文
+  - id: two_tier_five_options_drafting
+    label: 五大纲方向 → 五细纲 → 多猫生成下一章
     suggested_skill: novel-chapter-copilot
     hard_rules:
-      - id: novel-seamless-upstream-bridge
-        text: 新章节开篇必须无缝紧接上一章结尾切片与人物伤势持有物状态，禁止出现死人复活或知情权越界穿帮。
+      - id: novel-five-distinct-options
+        text: 每次生成的 5 个本章大纲方向与 5 套本章细纲必须拉开实质叙事差异，并严格承接上一章末尾状态。
         severity: blocker
     pitfalls: []
-  - id: finalize_and_reverse_distill
-    label: 作者审阅定稿与反向总结沉淀大纲设定
-    suggested_skill: novel-chapter-copilot
+  - id: human_revision_and_humanize
+    label: 人工建议多轮调整与去AI味专项优化
+    suggested_skill: novel-humanizer-zh
     hard_rules:
-      - id: novel-faithful-reverse-summary
-        text: 章后生成的总结式大纲与设定增量必须 100% 忠于作者确认定稿后的最终正文，严禁覆盖作者手写主线大纲。
+      - id: novel-zero-fact-drift-in-humanize
+        text: 去AI味阶段只消除AI套话、排比腔与机械句长，严禁擅自篡改作者在人工调整阶段已确认的剧情事实。
         severity: blocker
     pitfalls: []

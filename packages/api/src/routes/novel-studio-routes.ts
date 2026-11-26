@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import {
   backtrackModeSchema,
   catRegistry,
+  chapterDetailedOutlineOptionSchema,
   chapterDirectionOptionSchema,
+  chapterMacroDirectionSchema,
   chapterOutlineSchema,
   chapterStateDeltaSchema,
   dimensionSkillBindingSchema,
@@ -16,7 +18,9 @@ import {
   novelWorkflowConfigSchema,
   pacing5AxisScoreSchema,
   prose5AxisScoreSchema,
+  settingDissectionReportSchema,
   storyArcSchema,
+  studioWizardStepSchema,
   styleReferenceConfigSchema,
 } from '@cat-cafe/shared';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -875,6 +879,194 @@ export const novelStudioRoutes: FastifyPluginAsync<NovelStudioRoutesOptions> = a
     }
   });
 
+  // ── 0 → 7 Simple Guided Wizard Flow Endpoints ────────────────────────────
+  app.put('/api/novel-studio/projects/:projectId/wizard-step', async (request, reply) => {
+    try {
+      const { projectId } = z.object({ projectId: z.string().min(1) }).parse(request.params);
+      const { step } = z.object({ step: studioWizardStepSchema }).parse(request.body);
+      const project = runtime.orchestrator.setActiveWizardStep(projectId, step);
+      return { project, bundle: runtime.projectStore.loadBundle(projectId) };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.put('/api/novel-studio/projects/:projectId/module-references', async (request, reply) => {
+    try {
+      const { projectId } = z.object({ projectId: z.string().min(1) }).parse(request.params);
+      const { selections } = z
+        .object({
+          selections: z.array(
+            z.object({
+              dimension: novelCraftDimensionSchema,
+              referenceBookIds: z.array(z.string().min(1).max(80)).max(6),
+            }),
+          ),
+        })
+        .parse(request.body);
+      const project = runtime.orchestrator.bindModuleReferences(projectId, selections);
+      return { project, bundle: runtime.projectStore.loadBundle(projectId) };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post(
+    '/api/novel-studio/projects/:projectId/onboarding',
+    { bodyLimit: 16 * 1024 * 1024 },
+    async (request, reply) => {
+      try {
+        const { projectId } = z.object({ projectId: z.string().min(1) }).parse(request.params);
+        const body = z
+          .object({
+            rawUserSettingsInput: z.string().max(200_000).default(''),
+            rawOpeningChaptersInput: z.string().max(500_000).default(''),
+            wakeCats: z.boolean().default(true),
+          })
+          .parse(request.body ?? {});
+        return await runtime.orchestrator.submitOnboardingInputs(projectId, body);
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  app.post('/api/novel-studio/projects/:projectId/chapters/:chapterNo/macro-directions', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const body = z
+        .object({
+          feedbackHint: z.string().max(2000).optional(),
+          wakeCats: z.boolean().default(true),
+        })
+        .parse(request.body ?? {});
+      return await runtime.orchestrator.ideateChapterMacroDirections(projectId, chapterNo, body);
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/novel-studio/projects/:projectId/chapters/:chapterNo/detailed-outlines', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const body = z
+        .object({
+          selectedDirectionId: z.string().min(1).max(40),
+          feedbackHint: z.string().max(2000).optional(),
+          wakeCats: z.boolean().default(true),
+        })
+        .parse(request.body);
+      return await runtime.orchestrator.ideateChapterDetailedOutlines(projectId, chapterNo, body);
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/novel-studio/projects/:projectId/chapters/:chapterNo/execute-draft', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const body = z
+        .object({
+          selectedDetailedOutlineId: z.string().min(1).max(40),
+          extraNote: z.string().max(2000).optional(),
+          wakeCats: z.boolean().default(true),
+        })
+        .parse(request.body);
+      return await runtime.orchestrator.executeChapterFromDetailedOutline(projectId, chapterNo, body);
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post(
+    '/api/novel-studio/projects/:projectId/chapters/:chapterNo/revise',
+    { bodyLimit: 8 * 1024 * 1024 },
+    async (request, reply) => {
+      try {
+        const { projectId, chapterNo } = z
+          .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+          .parse(request.params);
+        const body = z
+          .object({
+            suggestion: z.string().min(2).max(3000),
+            currentTextOverride: z.string().max(120_000).optional(),
+            wakeCats: z.boolean().default(true),
+          })
+          .parse(request.body);
+        return await runtime.orchestrator.applyHumanRevisionSuggestion(projectId, chapterNo, body);
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  app.post('/api/novel-studio/projects/:projectId/chapters/:chapterNo/restore-revision', async (request, reply) => {
+    try {
+      const { projectId, chapterNo } = z
+        .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+        .parse(request.params);
+      const body = z
+        .object({
+          round: z.number().int().min(1),
+          which: z.enum(['previous', 'revised']).default('previous'),
+        })
+        .parse(request.body);
+      return runtime.orchestrator.restoreRevisionRound(projectId, chapterNo, body.round, body.which);
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post(
+    '/api/novel-studio/projects/:projectId/chapters/:chapterNo/humanize',
+    { bodyLimit: 8 * 1024 * 1024 },
+    async (request, reply) => {
+      try {
+        const { projectId, chapterNo } = z
+          .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+          .parse(request.params);
+        const body = z
+          .object({
+            sourceTextOverride: z.string().max(120_000).optional(),
+            extraToneHint: z.string().max(1000).optional(),
+            wakeCats: z.boolean().default(true),
+          })
+          .parse(request.body ?? {});
+        return await runtime.orchestrator.runDeAiOptimization(projectId, chapterNo, body);
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  app.post(
+    '/api/novel-studio/projects/:projectId/chapters/:chapterNo/finalize-product',
+    { bodyLimit: 8 * 1024 * 1024 },
+    async (request, reply) => {
+      try {
+        const { projectId, chapterNo } = z
+          .object({ projectId: z.string().min(1), chapterNo: z.coerce.number().int().min(1) })
+          .parse(request.params);
+        const body = z
+          .object({
+            title: z.string().max(120).optional(),
+            finalText: z.string().min(1).max(120_000),
+            advanceToNextChapter: z.boolean().default(true),
+          })
+          .parse(request.body);
+        return await runtime.orchestrator.finalizeChapterProduct(projectId, chapterNo, body);
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
   app.post('/api/novel-studio/projects/:projectId/rollback', async (request, reply) => {
     try {
       const { projectId } = z.object({ projectId: z.string().min(1) }).parse(request.params);
@@ -1143,6 +1335,37 @@ export const callbackNovelStudioRoutes: FastifyPluginAsync<CallbackNovelStudioRo
     }
   });
 
+  app.post('/api/callbacks/novel-studio/submit-dissection', { bodyLimit: 4 * 1024 * 1024 }, async (request, reply) => {
+    const principal = requireCallbackPrincipal(request, reply);
+    if (!principal) return;
+    try {
+      const body = z
+        .object({
+          projectId: z.string().min(1),
+          report: settingDissectionReportSchema
+            .omit({ status: true, analyzedAt: true })
+            .extend({ analyzedAt: z.string().optional() }),
+          stateDelta: chapterStateDeltaSchema.optional(),
+        })
+        .parse(request.body);
+      const bundle = runtime.orchestrator.saveSettingDissection(body.projectId, {
+        report: {
+          ...body.report,
+          analyzedByCats: body.report.analyzedByCats.length > 0 ? body.report.analyzedByCats : [principal.catId],
+        },
+        stateDelta: body.stateDelta,
+      });
+      return {
+        projectId: bundle.project.id,
+        seedChapterCount: bundle.project.seedChapterCount,
+        nextChapterNo: bundle.project.currentChapterNo,
+        characterCount: bundle.canon.characters.length,
+      };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
   app.post('/api/callbacks/novel-studio/submit-directions', async (request, reply) => {
     const principal = requireCallbackPrincipal(request, reply);
     if (!principal) return;
@@ -1151,15 +1374,60 @@ export const callbackNovelStudioRoutes: FastifyPluginAsync<CallbackNovelStudioRo
         .object({
           projectId: z.string().min(1),
           chapterNo: z.number().int().min(1),
-          options: z.array(chapterDirectionOptionSchema).min(1).max(5),
+          macroDirections: z.array(chapterMacroDirectionSchema).min(1).max(5).optional(),
+          options: z.array(chapterDirectionOptionSchema).min(1).max(5).optional(),
         })
         .parse(request.body);
-      const record = runtime.orchestrator.saveChapterDirections(body.projectId, body.chapterNo, body.options);
+
+      if (body.macroDirections?.length) {
+        const record = runtime.orchestrator.saveChapterMacroDirections(
+          body.projectId,
+          body.chapterNo,
+          body.macroDirections,
+        );
+        return {
+          projectId: body.projectId,
+          chapterNo: body.chapterNo,
+          stage: record.stage,
+          optionCount: record.macroDirections.length,
+        };
+      }
+      if (body.options?.length) {
+        const record = runtime.orchestrator.saveChapterDirections(body.projectId, body.chapterNo, body.options);
+        return {
+          projectId: body.projectId,
+          chapterNo: body.chapterNo,
+          stage: record.stage,
+          optionCount: record.directionOptions.length,
+        };
+      }
+      throw new Error('Either macroDirections or options (1..5 items) must be provided');
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/callbacks/novel-studio/submit-detailed-outlines', async (request, reply) => {
+    const principal = requireCallbackPrincipal(request, reply);
+    if (!principal) return;
+    try {
+      const body = z
+        .object({
+          projectId: z.string().min(1),
+          chapterNo: z.number().int().min(1),
+          detailedOutlines: z.array(chapterDetailedOutlineOptionSchema).min(1).max(5),
+        })
+        .parse(request.body);
+      const record = runtime.orchestrator.saveChapterDetailedOutlines(
+        body.projectId,
+        body.chapterNo,
+        body.detailedOutlines,
+      );
       return {
         projectId: body.projectId,
         chapterNo: body.chapterNo,
         stage: record.stage,
-        optionCount: record.directionOptions.length,
+        optionCount: record.detailedOutlineOptions.length,
       };
     } catch (err) {
       return sendError(reply, err);

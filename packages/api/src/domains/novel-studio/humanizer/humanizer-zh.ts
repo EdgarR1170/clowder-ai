@@ -128,8 +128,14 @@ export function analyzeChineseAiFlavor(text: string, styleProfile?: StyleProfile
  */
 export function lightPolishAiCliches(text: string): string {
   return text
-    .replace(/嘴角(?:微微)?(?:勾起|扬起)一抹(?:不易察觉的)?弧度/g, '唇角微动')
-    .replace(/空气(?:在这一刻)?仿佛凝固了(?:一般)?[，。]/g, '四周骤然安静下来。')
+    .replace(/嘴角(?:微微)?(?:勾起|扬起|掀起)一抹(?:不易察觉的|意味深长的|冰冷的|嘲讽的)?弧度/g, '唇角微动')
+    .replace(
+      /眼(?:眸|底|中|神)(?:深处)?闪过一(?:丝|抹)(?:不易察觉的|复杂的|冰冷的|骇人的)?(?:光芒|精光|寒芒|异色|神色)/g,
+      '目光微凝',
+    )
+    .replace(/空气(?:在这一刻)?仿佛(?:凝固|静止)了(?:一般)?[，。]?/g, '四周骤然安静下来。')
     .replace(/下意识地不由得/g, '下意识')
-    .replace(/不由自主地微微一怔/g, '微怔');
+    .replace(/不由自主地微微一怔/g, '微怔')
+    .replace(/心中不禁涌起一股/g, '心头生出几分')
+    .replace(/(?:他知道|她明白|众人清楚)，这仅仅只是(?:一个)?开始[^。！？]*[。！？]/g, '');
 }

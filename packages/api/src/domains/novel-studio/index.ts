@@ -11,6 +11,7 @@ export * from './canon/invariant-checker.js';
 export * from './coordinator/chapter-orchestrator.js';
 export * from './coordinator/copilot-context-builder.js';
 export * from './coordinator/novel-project-store.js';
+export * from './coordinator/onboarding-dissector.js';
 export * from './corpus/novel-embedding-provider.js';
 export * from './corpus/novel-ingestor.js';
 export * from './corpus/novel-vector-store.js';

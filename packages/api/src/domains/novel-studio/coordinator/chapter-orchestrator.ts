@@ -1,14 +1,18 @@
 import {
   type ArchivedBranchRecord,
   type BacktrackMode,
+  type ChapterDetailedOutlineOption,
   type ChapterDirectionOption,
+  type ChapterMacroDirection,
   type ChapterOutline,
   type ChapterQualityReport,
   type ChapterStateDelta,
   type ChapterStateRecord,
   type ChapterVersionSnapshot,
   type ContinuityBridgeAlert,
+  chapterDetailedOutlineOptionSchema,
   chapterDirectionOptionSchema,
+  chapterMacroDirectionSchema,
   chapterOutlineSchema,
   chapterStateDeltaSchema,
   type DimensionSkillBinding,
@@ -17,14 +21,18 @@ import {
   isChapterCompletedStage,
   type MechanicsLedger,
   type NarrativeGraph,
+  NOVEL_CRAFT_DIMENSIONS,
   type NovelCraftDimension,
   type NovelProject,
   type NovelWorkflowConfig,
   type Pacing5AxisScore,
   type Prose5AxisScore,
   type RetrievedBeatPassage,
+  type SettingDissectionReport,
   type StoryArc,
+  type StudioWizardStep,
   type StyleReferenceConfig,
+  settingDissectionReportSchema,
   storyArcSchema,
 } from '@cat-cafe/shared';
 import { nanoid } from 'nanoid';
@@ -46,6 +54,16 @@ import {
   rebuildRollingSynopsisMarkdown,
 } from './copilot-context-builder.js';
 import type { FullNovelProjectBundle, NovelProjectStore } from './novel-project-store.js';
+import {
+  buildBaselineDissectionReport,
+  buildDeAiHumanizePrompt,
+  buildDetailedOutlinesPrompt,
+  buildExecuteDraftFromBeatsPrompt,
+  buildMacroDirectionsPrompt,
+  buildOnboardingDissectionPrompt,
+  formatBoundModulesSummary,
+  parseOpeningChaptersInput,
+} from './onboarding-dissector.js';
 
 export interface ThreadCoordinatorPort {
   ensureEditorialThread(params: {
@@ -197,6 +215,9 @@ export class ChapterOrchestrator {
     project.workflow.autoRemainingChapters = 0;
 
     const activeStages = new Set<ChapterStateRecord['stage']>([
+      'ideating_directions',
+      'ideating_beats',
+      'revising',
       'ideating',
       'summarizing',
       'prechecking',
@@ -321,9 +342,18 @@ export class ChapterOrchestrator {
       chapterNo,
       title: existingRecord?.title || outline.title,
       stage: 'drafting',
+      isSeedChapter: existingRecord?.isSeedChapter ?? false,
       rewriteRound: resetDraft ? 0 : (existingRecord?.rewriteRound ?? 0),
       authorSeedHint: existingRecord?.authorSeedHint ?? '',
       backtrackMode: existingRecord?.backtrackMode,
+      macroDirections: existingRecord?.macroDirections ?? [],
+      selectedMacroDirectionId: existingRecord?.selectedMacroDirectionId ?? '',
+      macroFeedbackHint: existingRecord?.macroFeedbackHint ?? '',
+      detailedOutlineOptions: existingRecord?.detailedOutlineOptions ?? [],
+      selectedDetailedOutlineId: existingRecord?.selectedDetailedOutlineId ?? '',
+      detailedFeedbackHint: existingRecord?.detailedFeedbackHint ?? '',
+      revisionHistory: resetDraft ? [] : (existingRecord?.revisionHistory ?? []),
+      humanizerReport: resetDraft ? undefined : existingRecord?.humanizerReport,
       directionOptions: existingRecord?.directionOptions ?? [],
       selectedDirection: existingRecord?.selectedDirection,
       distilledSummary: resetDraft ? undefined : existingRecord?.distilledSummary,
@@ -842,6 +872,650 @@ export class ChapterOrchestrator {
   }
 
   // =========================================================================
+  // 0 → 7 Simple Guided Wizard Flow Methods
+  // =========================================================================
+
+  setActiveWizardStep(projectId: string, step: StudioWizardStep): NovelProject {
+    const bundle = this.mustLoad(projectId);
+    bundle.project.activeWizardStep = step;
+    this.store.saveBundle(bundle.project);
+    return this.mustLoad(projectId).project;
+  }
+
+  /**
+   * Step 2: Select reference novels per module (plot_arc, battle_action, character_persona,
+   * scene_atmosphere, world_mechanics, prose_style) and auto-compile/mount Book-to-Skill packages.
+   */
+  bindModuleReferences(
+    projectId: string,
+    selections: Array<{ dimension: NovelCraftDimension; referenceBookIds: string[] }>,
+  ): NovelProject {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    const byDim = new Map(selections.map((s) => [s.dimension, [...new Set(s.referenceBookIds)]]));
+    const existingSkills = this.skillCompiler.listSkills();
+
+    const nextBindings: DimensionSkillBinding[] = NOVEL_CRAFT_DIMENSIONS.map((dim) => {
+      const prev = project.dimensionBindings.find((b) => b.dimension === dim);
+      const bookIds = byDim.get(dim) ?? prev?.referenceBookIds ?? [];
+      const skillSlugs: string[] = [];
+
+      for (const bookId of bookIds) {
+        let matched = existingSkills.find((sk) => sk.sourceBookId === bookId && sk.dimension === dim);
+        if (!matched) {
+          const book = this.corpus.getBook(bookId);
+          if (book) {
+            const chunks = this.corpus.sampleRepresentativeChunks(bookId, dim, 6);
+            matched = this.skillCompiler.compileFromBookSamples({
+              book,
+              dimension: dim,
+              sampledChunks: chunks,
+            });
+            existingSkills.push(matched);
+          }
+        }
+        if (matched) skillSlugs.push(matched.slug);
+      }
+
+      return {
+        dimension: dim,
+        skillSlugs: [...new Set(skillSlugs)],
+        referenceBookIds: bookIds,
+        ragWeight: prev?.ragWeight ?? 0.8,
+        ragMode: 'structural_beats',
+      };
+    });
+
+    project.dimensionBindings = nextBindings;
+    const styleBookIds = [...(byDim.get('prose_style') ?? []), ...(byDim.get('plot_arc') ?? [])];
+    if (styleBookIds.length > 0) {
+      project.styleConfig.referenceBookIds = [...new Set(styleBookIds)].slice(0, 6);
+    }
+    this.store.saveBundle(project);
+    return this.mustLoad(projectId).project;
+  }
+
+  /**
+   * Step 3: Save single Settings input + single First-3-Chapters input, split & archive seed chapters,
+   * extract author's native voice metrics, and dispatch Multi-Cat Dissection Analysis.
+   */
+  async submitOnboardingInputs(
+    projectId: string,
+    input: {
+      rawUserSettingsInput: string;
+      rawOpeningChaptersInput: string;
+      wakeCats?: boolean;
+    },
+  ): Promise<FullNovelProjectBundle> {
+    const bundle = this.mustLoad(projectId);
+    const { project, canon } = bundle;
+
+    project.rawUserSettingsInput = input.rawUserSettingsInput;
+    project.rawOpeningChaptersInput = input.rawOpeningChaptersInput;
+    project.authorMasterOutlineMarkdown = input.rawUserSettingsInput;
+
+    // Remove previously imported seed chapters when re-submitting Step 3
+    for (const [key, rec] of Object.entries(project.chapters)) {
+      if (rec?.isSeedChapter) {
+        delete project.chapters[key];
+      }
+    }
+
+    const parsedSeeds = parseOpeningChaptersInput(input.rawOpeningChaptersInput);
+    const now = new Date().toISOString();
+    for (const seed of parsedSeeds) {
+      const rec = this.ensureChapterRecord(project, seed.chapterNo);
+      rec.title = seed.title;
+      rec.isSeedChapter = true;
+      rec.stage = 'completed';
+      rec.rawDraft = seed.content;
+      rec.humanizedDraft = seed.content;
+      rec.finalText = seed.content;
+      rec.distilledSummary = seed.summary;
+      rec.updatedAt = now;
+    }
+
+    project.seedChapterCount = parsedSeeds.length;
+    project.currentChapterNo = parsedSeeds.length + 1;
+    project.activeWizardStep = 'onboarding';
+    project.rollingSynopsisMarkdown = rebuildRollingSynopsisMarkdown(project);
+
+    const architectCat = project.catRoster.architectCatId || project.copilotCatId || 'opus';
+    const writerCat = project.catRoster.writerCatId || project.copilotCatId || 'kimi';
+    const willWakeCats = input.wakeCats !== false && Boolean(this.threadCoordinator);
+
+    const baselineReport = buildBaselineDissectionReport({
+      rawSettings: input.rawUserSettingsInput,
+      parsedChapters: parsedSeeds,
+      isAnalyzing: willWakeCats,
+      catIds: [architectCat, writerCat],
+    });
+    project.dissectionReport = baselineReport;
+
+    this.mergeDissectionIntoCanon(canon, baselineReport, parsedSeeds.length);
+    this.store.saveCanonSnapshot(project.id, parsedSeeds.length, canon);
+
+    if (willWakeCats && this.threadCoordinator) {
+      const threadId = await this.threadCoordinator.ensureEditorialThread({
+        existingThreadId: project.threadId,
+        title: `📖《${project.title}》多猫创作工坊`,
+        catIds: [...new Set([architectCat, writerCat, project.catRoster.criticCatId].filter(Boolean))],
+      });
+      if (threadId) {
+        project.threadId = threadId;
+        await this.threadCoordinator.dispatchToCat({
+          threadId,
+          targetCatId: architectCat,
+          markdown: buildOnboardingDissectionPrompt({
+            project,
+            seedCount: parsedSeeds.length,
+            architectCatId: architectCat,
+            writerCatId: writerCat,
+          }),
+        });
+      }
+    }
+
+    this.store.saveBundle(project, canon, bundle.mechanics);
+    return this.mustLoad(projectId);
+  }
+
+  saveSettingDissection(
+    projectId: string,
+    input: {
+      report: Omit<SettingDissectionReport, 'status' | 'analyzedAt'> &
+        Partial<Pick<SettingDissectionReport, 'analyzedAt'>>;
+      stateDelta?: ChapterStateDelta;
+    },
+  ): FullNovelProjectBundle {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    const parsedReport = settingDissectionReportSchema.parse({
+      ...input.report,
+      status: 'ready',
+      analyzedAt: input.report.analyzedAt ?? new Date().toISOString(),
+    });
+    project.dissectionReport = parsedReport;
+
+    this.mergeDissectionIntoCanon(bundle.canon, parsedReport, project.seedChapterCount);
+    if (input.stateDelta) {
+      const applied = applyCommittedChapterDelta({
+        chapterNo: project.seedChapterCount,
+        graph: bundle.canon,
+        mechanics: bundle.mechanics,
+        delta: chapterStateDeltaSchema.parse(input.stateDelta),
+      });
+      bundle.canon = applied.nextGraph;
+      bundle.mechanics = applied.nextMechanics;
+    }
+
+    this.store.saveCanonSnapshot(project.id, project.seedChapterCount, bundle.canon);
+    this.store.saveBundle(project, bundle.canon, bundle.mechanics);
+    return this.mustLoad(projectId);
+  }
+
+  /**
+   * Step 4A: Propose 5 macro chapter outline directions for the target chapter (repeatable!).
+   */
+  async ideateChapterMacroDirections(
+    projectId: string,
+    chapterNo: number,
+    options: { feedbackHint?: string; wakeCats?: boolean } = {},
+  ): Promise<FullNovelProjectBundle> {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    const record = this.ensureChapterRecord(project, chapterNo);
+
+    if (options.feedbackHint !== undefined) {
+      record.macroFeedbackHint = options.feedbackHint.trim();
+    }
+    record.stage = 'ideating_directions';
+    record.updatedAt = new Date().toISOString();
+    project.currentChapterNo = chapterNo;
+    project.activeWizardStep = 'generate';
+
+    const plotBind = project.dimensionBindings.find((b) => b.dimension === 'plot_arc');
+    if (plotBind && plotBind.referenceBookIds.length > 0) {
+      record.ragPassages = await this.corpus.searchPassages({
+        query: record.macroFeedbackHint || project.dissectionReport?.nextChapterBridgeAnchor || project.title,
+        bookIds: plotBind.referenceBookIds,
+        dimension: 'plot_arc',
+        topK: 3,
+        mode: 'structural_beats',
+        embedder: this.embedRegistry.resolveActiveEmbedder(),
+      });
+    }
+
+    if (options.wakeCats !== false && this.threadCoordinator) {
+      const architectCat = project.catRoster.architectCatId || project.copilotCatId || 'opus';
+      const prevRec = project.chapters[String(chapterNo - 1)];
+      const prevTail = (prevRec?.finalText || prevRec?.humanizedDraft || prevRec?.rawDraft || '').slice(-600);
+      await this.dispatchToTargetCat(
+        project,
+        architectCat,
+        buildMacroDirectionsPrompt({
+          project,
+          chapterNo,
+          feedbackHint: record.macroFeedbackHint,
+          boundModulesSummary: this.getBoundModulesSummary(project),
+          prevTailExcerpt: prevTail,
+        }),
+      );
+    }
+
+    this.store.saveBundle(project);
+    return this.mustLoad(projectId);
+  }
+
+  saveChapterMacroDirections(
+    projectId: string,
+    chapterNo: number,
+    macroDirections: ChapterMacroDirection[],
+  ): ChapterStateRecord {
+    const bundle = this.mustLoad(projectId);
+    const parsed = macroDirections.map((item) => chapterMacroDirectionSchema.parse(item));
+    if (parsed.length === 0 || parsed.length > 5) {
+      throw new Error('macroDirections must contain 1 to 5 options');
+    }
+    const record = this.ensureChapterRecord(bundle.project, chapterNo);
+    record.macroDirections = parsed;
+    record.stage = 'selecting_direction';
+    record.updatedAt = new Date().toISOString();
+    this.store.saveBundle(bundle.project);
+    return this.ensureChapterRecord(this.mustLoad(projectId).project, chapterNo);
+  }
+
+  /**
+   * Step 4B: Expand user's chosen macro direction into 5 detailed scene-beat outlines (repeatable!).
+   */
+  async ideateChapterDetailedOutlines(
+    projectId: string,
+    chapterNo: number,
+    input: { selectedDirectionId: string; feedbackHint?: string; wakeCats?: boolean },
+  ): Promise<FullNovelProjectBundle> {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    const record = this.ensureChapterRecord(project, chapterNo);
+    const chosen = record.macroDirections.find((d) => d.optionId === input.selectedDirectionId);
+    if (!chosen) {
+      throw new Error(`未找到所选的大纲方向 (${input.selectedDirectionId})，请先选择本章大纲方向。`);
+    }
+
+    record.selectedMacroDirectionId = input.selectedDirectionId;
+    if (input.feedbackHint !== undefined) {
+      record.detailedFeedbackHint = input.feedbackHint.trim();
+    }
+    record.stage = 'ideating_beats';
+    record.updatedAt = new Date().toISOString();
+
+    if (input.wakeCats !== false && this.threadCoordinator) {
+      const targetCat = project.catRoster.architectCatId || project.copilotCatId || 'opus';
+      await this.dispatchToTargetCat(
+        project,
+        targetCat,
+        buildDetailedOutlinesPrompt({
+          project,
+          chapterNo,
+          chosenDirection: chosen,
+          feedbackHint: record.detailedFeedbackHint,
+          boundModulesSummary: this.getBoundModulesSummary(project),
+        }),
+      );
+    }
+
+    this.store.saveBundle(project);
+    return this.mustLoad(projectId);
+  }
+
+  saveChapterDetailedOutlines(
+    projectId: string,
+    chapterNo: number,
+    detailedOutlines: ChapterDetailedOutlineOption[],
+  ): ChapterStateRecord {
+    const bundle = this.mustLoad(projectId);
+    const parsed = detailedOutlines.map((item) => chapterDetailedOutlineOptionSchema.parse(item));
+    if (parsed.length === 0 || parsed.length > 5) {
+      throw new Error('detailedOutlines must contain 1 to 5 options');
+    }
+    const record = this.ensureChapterRecord(bundle.project, chapterNo);
+    record.detailedOutlineOptions = parsed;
+    record.stage = 'selecting_beats';
+    record.updatedAt = new Date().toISOString();
+    this.store.saveBundle(bundle.project);
+    return this.ensureChapterRecord(this.mustLoad(projectId).project, chapterNo);
+  }
+
+  /**
+   * Step 4C: Execute chapter drafting from the user's chosen detailed outline,
+   * mounting all per-module reference skills & RAG beat skeletons selected in Step 2.
+   */
+  async executeChapterFromDetailedOutline(
+    projectId: string,
+    chapterNo: number,
+    input: { selectedDetailedOutlineId: string; extraNote?: string; wakeCats?: boolean },
+  ): Promise<FullNovelProjectBundle> {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    const record = this.ensureChapterRecord(project, chapterNo);
+    const chosen = record.detailedOutlineOptions.find((o) => o.optionId === input.selectedDetailedOutlineId);
+    if (!chosen) {
+      throw new Error(`未找到所选细纲方案 (${input.selectedDetailedOutlineId})。`);
+    }
+
+    this.archiveRecordIntoHistory(record, '按新细纲重新生成初稿前自动留存');
+
+    const neededDims = new Set<NovelCraftDimension>(['prose_style']);
+    for (const beat of chosen.sceneBeats) {
+      neededDims.add(beat.craftDimension);
+    }
+    const activeSlugs = new Set<string>();
+    const ragPassages: RetrievedBeatPassage[] = [];
+    const embedder = this.embedRegistry.resolveActiveEmbedder();
+
+    for (const dim of neededDims) {
+      const bind = project.dimensionBindings.find((b) => b.dimension === dim);
+      if (!bind) continue;
+      for (const s of bind.skillSlugs) activeSlugs.add(s);
+      if (bind.referenceBookIds.length > 0) {
+        const beatQuery =
+          chosen.sceneBeats
+            .filter((b) => b.craftDimension === dim)
+            .map((b) => b.sceneSummary)
+            .join('；') || chosen.title;
+        const hits = await this.corpus.searchPassages({
+          query: beatQuery,
+          bookIds: bind.referenceBookIds,
+          dimension: dim,
+          topK: 2,
+          mode: 'structural_beats',
+          embedder,
+        });
+        ragPassages.push(...hits);
+      }
+    }
+
+    const writerCat = project.catRoster.writerCatId || project.copilotCatId || 'kimi';
+    record.selectedDetailedOutlineId = input.selectedDetailedOutlineId;
+    record.title = chosen.title;
+    record.activeSkillSlugs = [...activeSlugs];
+    record.ragPassages = ragPassages;
+    record.writerCatId = writerCat;
+    record.stage = 'drafting';
+    record.updatedAt = new Date().toISOString();
+
+    if (input.wakeCats !== false && this.threadCoordinator) {
+      await this.dispatchToTargetCat(
+        project,
+        writerCat,
+        buildExecuteDraftFromBeatsPrompt({
+          project,
+          chapterNo,
+          chosenDetailed: chosen,
+          boundModulesSummary: this.getBoundModulesSummary(project),
+          extraNote: input.extraNote,
+        }),
+      );
+    }
+
+    this.store.saveBundle(project);
+    return this.mustLoad(projectId);
+  }
+
+  /**
+   * Step 5: Repeatable human suggestions & multi-round revision.
+   */
+  async applyHumanRevisionSuggestion(
+    projectId: string,
+    chapterNo: number,
+    input: { suggestion: string; currentTextOverride?: string; wakeCats?: boolean },
+  ): Promise<FullNovelProjectBundle> {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    const record = this.ensureChapterRecord(project, chapterNo);
+    const baseText = (
+      input.currentTextOverride?.trim() ||
+      record.rawDraft.trim() ||
+      record.humanizedDraft.trim() ||
+      record.finalText.trim()
+    ).trim();
+
+    if (!baseText) {
+      throw new Error(`第 ${chapterNo} 章尚无初稿可调整，请先在 Step 4 生成正文。`);
+    }
+
+    const writerCat = record.writerCatId || project.catRoster.writerCatId || project.copilotCatId || 'kimi';
+    const nextRound = record.revisionHistory.length + 1;
+    record.revisionHistory = [
+      ...record.revisionHistory.slice(-29),
+      {
+        round: nextRound,
+        userSuggestion: input.suggestion.trim(),
+        previousContent: baseText,
+        revisedContent: '',
+        catId: writerCat,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    record.rawDraft = baseText;
+    record.authorNotes = input.suggestion.trim();
+    record.stage = 'revising';
+    record.updatedAt = new Date().toISOString();
+    project.activeWizardStep = 'revise';
+
+    if (input.wakeCats !== false && this.threadCoordinator) {
+      await this.dispatchToTargetCat(
+        project,
+        writerCat,
+        [
+          `@${writerCat} **【Step 5 · 人工建议调整《${project.title}》第 ${chapterNo} 章（第 ${nextRound} 轮修改）】**`,
+          `- **项目 ID**：\`${project.id}\` | **章节**：第 ${chapterNo} 章`,
+          `- **作者修改建议**：\n> ${input.suggestion.trim()}`,
+          '',
+          `请调用 \`novel_read_project_context(projectId="${project.id}", chapterNo=${chapterNo})\` 查看当前草稿与前后衔接，严格按作者建议调整优化后调用 \`novel_submit_chapter_draft(projectId="${project.id}", chapterNo=${chapterNo}, draftKind="copilot", title="${record.title}", content="...")\` 提交新稿！`,
+        ].join('\n'),
+      );
+    }
+
+    this.store.saveBundle(project);
+    return this.mustLoad(projectId);
+  }
+
+  restoreRevisionRound(
+    projectId: string,
+    chapterNo: number,
+    round: number,
+    which: 'previous' | 'revised' = 'previous',
+  ): FullNovelProjectBundle {
+    const bundle = this.mustLoad(projectId);
+    const record = this.mustChapterRecord(bundle.project, chapterNo);
+    const entry = record.revisionHistory.find((r) => r.round === round);
+    if (!entry) throw new Error(`未找到第 ${round} 轮修改记录`);
+    const chosenText = (
+      which === 'revised' && entry.revisedContent ? entry.revisedContent : entry.previousContent
+    ).trim();
+    record.rawDraft = chosenText;
+    record.humanizedDraft = chosenText;
+    record.finalText = chosenText;
+    record.stage = 'draft_ready';
+    record.updatedAt = new Date().toISOString();
+    this.store.saveBundle(bundle.project);
+    return this.mustLoad(projectId);
+  }
+
+  /**
+   * Step 6: Dedicated De-AI Optimization (diagnoses clichés/monotone cadence + polishes into natural human prose).
+   */
+  async runDeAiOptimization(
+    projectId: string,
+    chapterNo: number,
+    input: { sourceTextOverride?: string; extraToneHint?: string; wakeCats?: boolean } = {},
+  ): Promise<FullNovelProjectBundle> {
+    const bundle = this.mustLoad(projectId);
+    const { project } = bundle;
+    const record = this.ensureChapterRecord(project, chapterNo);
+    const sourceText = (
+      input.sourceTextOverride?.trim() ||
+      record.rawDraft.trim() ||
+      record.finalText.trim() ||
+      record.humanizedDraft.trim()
+    ).trim();
+
+    if (!sourceText) {
+      throw new Error(`第 ${chapterNo} 章尚无正文可供去AI味优化。`);
+    }
+
+    const styleBind = project.dimensionBindings.find((b) => b.dimension === 'prose_style');
+    const styleProfile = styleBind?.skillSlugs
+      .map((slug) => this.skillCompiler.getSkill(slug)?.spec.styleProfile)
+      .find((sp) => sp !== undefined);
+
+    record.rawDraft = sourceText;
+    const beforeReport = analyzeChineseAiFlavor(sourceText, styleProfile);
+    const polishedBaseline = lightPolishAiCliches(sourceText);
+    const afterBaselineReport = analyzeChineseAiFlavor(polishedBaseline, styleProfile);
+
+    record.humanizerReport = {
+      ...beforeReport,
+      humanizedCharCount: polishedBaseline.length,
+    };
+    record.humanizedDraft = polishedBaseline;
+    record.finalText = polishedBaseline;
+
+    const willWakeCat = input.wakeCats !== false && Boolean(this.threadCoordinator);
+    record.stage = willWakeCat ? 'humanizing' : 'humanized_ready';
+    record.updatedAt = new Date().toISOString();
+    project.activeWizardStep = 'humanize';
+
+    if (willWakeCat && this.threadCoordinator) {
+      const humanizerCat =
+        project.catRoster.criticCatId || project.catRoster.writerCatId || project.copilotCatId || 'kimi';
+      await this.dispatchToTargetCat(
+        project,
+        humanizerCat,
+        buildDeAiHumanizePrompt({
+          project,
+          chapterNo,
+          flavorReport: beforeReport,
+          extraToneHint: input.extraToneHint,
+        }),
+      );
+    } else {
+      record.humanizerReport = {
+        ...afterBaselineReport,
+        flags: beforeReport.flags,
+        rawCharCount: sourceText.length,
+        humanizedCharCount: polishedBaseline.length,
+      };
+    }
+
+    this.store.saveBundle(project);
+    return this.mustLoad(projectId);
+  }
+
+  /**
+   * Step 7: User edits final finished manuscript, locks canon snapshot silently, and optionally advances to Chapter K+1.
+   */
+  async finalizeChapterProduct(
+    projectId: string,
+    chapterNo: number,
+    input: { title?: string; finalText: string; advanceToNextChapter?: boolean },
+  ): Promise<FullNovelProjectBundle> {
+    await this.finalizeAndSummarizeChapter({
+      projectId,
+      chapterNo,
+      title: input.title,
+      finalTextOverride: input.finalText,
+      wakeCatForDeepSummary: false,
+    });
+    const bundle = this.mustLoad(projectId);
+    if (input.advanceToNextChapter !== false) {
+      bundle.project.currentChapterNo = chapterNo + 1;
+      bundle.project.activeWizardStep = 'generate';
+    } else {
+      bundle.project.activeWizardStep = 'final';
+    }
+    this.store.saveBundle(bundle.project);
+    return this.mustLoad(projectId);
+  }
+
+  private mergeDissectionIntoCanon(
+    canon: NarrativeGraph,
+    report: SettingDissectionReport,
+    updatedChapter: number,
+  ): void {
+    for (const ch of report.characters) {
+      const existing = canon.characters.find((c) => c.name === ch.name);
+      if (existing) {
+        if (ch.traitsAndVoice) existing.voiceTraits = ch.traitsAndVoice;
+        if (ch.currentStatusAndGoal) existing.motivation = ch.currentStatusAndGoal;
+      } else {
+        canon.characters.push({
+          id: `char-${nanoid(6).toLowerCase()}`,
+          name: ch.name,
+          aliases: [],
+          role: ch.role,
+          status: 'alive',
+          locationId: '故事主舞台',
+          injuriesOrDebuffs: [],
+          inventory: [],
+          powerTier: '',
+          voiceTraits: ch.traitsAndVoice,
+          motivation: ch.currentStatusAndGoal,
+          knownFactIds: [],
+          relationships: [],
+          lastUpdatedChapter: updatedChapter,
+        });
+      }
+    }
+    for (const hook of report.plantedHooks) {
+      if (!canon.foreshadowings.some((f) => f.clue === hook)) {
+        canon.foreshadowings.push({
+          id: `clue-${nanoid(5).toLowerCase()}`,
+          clue: hook,
+          plantedChapter: Math.max(1, updatedChapter),
+          expectedPayoffWindow: '后续章节',
+          status: 'planted',
+          notes: '',
+        });
+      }
+    }
+    canon.revision += 1;
+    canon.updatedAt = new Date().toISOString();
+  }
+
+  private getBoundModulesSummary(project: NovelProject): string {
+    const books = this.corpus.listBooks();
+    const map = new Map(books.map((b) => [b.id, b.title]));
+    return formatBoundModulesSummary(project, map);
+  }
+
+  private async dispatchToTargetCat(project: NovelProject, targetCatId: string, markdown: string): Promise<void> {
+    if (!this.threadCoordinator) return;
+    const cats = [
+      ...new Set(
+        [
+          targetCatId,
+          project.catRoster.architectCatId,
+          project.catRoster.writerCatId,
+          project.catRoster.criticCatId,
+        ].filter(Boolean),
+      ),
+    ];
+    const threadId = await this.threadCoordinator.ensureEditorialThread({
+      existingThreadId: project.threadId,
+      title: `📖《${project.title}》多猫创作工坊`,
+      catIds: cats,
+    });
+    if (!threadId) return;
+    project.threadId = threadId;
+    await this.threadCoordinator.dispatchToCat({
+      threadId,
+      targetCatId,
+      markdown,
+    });
+  }
+
+  // =========================================================================
   // Human-in-the-Loop Chapter Co-Pilot Methods (Bottom-Up 5-Direction Flow)
   // =========================================================================
 
@@ -966,6 +1640,13 @@ export class ChapterOrchestrator {
     }
     const record = this.ensureChapterRecord(bundle.project, chapterNo);
     record.directionOptions = parsed;
+    record.macroDirections = parsed.map((opt) => ({
+      optionId: opt.optionId,
+      title: opt.title,
+      summary: opt.pitch,
+      conflictHighlight: opt.openingBeat,
+      endingHook: opt.endingHook,
+    }));
     record.stage = 'awaiting_choice';
     record.updatedAt = new Date().toISOString();
     this.store.saveBundle(bundle.project);
@@ -1220,6 +1901,7 @@ export class ChapterOrchestrator {
       chapterNo: number;
       authorCatId: string;
       title?: string;
+      draftKind?: 'raw' | 'humanized' | 'copilot';
       content: string;
       proposedStateDelta?: ChapterStateDelta;
     },
@@ -1246,13 +1928,35 @@ export class ChapterOrchestrator {
     if (params.title?.trim()) {
       record.title = params.title.trim();
     }
-    record.rawDraft = rawTrimmed;
-    record.humanizedDraft = cleaned;
-    record.finalText = cleaned;
+
+    if (params.draftKind === 'humanized') {
+      if (!record.rawDraft) {
+        record.rawDraft = rawTrimmed;
+      }
+      record.humanizedDraft = cleaned;
+      record.finalText = cleaned;
+      record.humanizerReport = {
+        ...flavor,
+        rawCharCount: record.rawDraft.length,
+        humanizedCharCount: cleaned.length,
+      };
+      record.stage = wasPaused ? 'paused' : 'humanized_ready';
+    } else {
+      record.rawDraft = rawTrimmed;
+      record.humanizedDraft = cleaned;
+      record.finalText = cleaned;
+      record.humanizerReport = analyzeChineseAiFlavor(rawTrimmed);
+      const lastRev = record.revisionHistory[record.revisionHistory.length - 1];
+      if (lastRev && !lastRev.revisedContent) {
+        lastRev.revisedContent = rawTrimmed;
+        lastRev.catId = params.authorCatId;
+      }
+      record.stage = wasPaused ? 'paused' : 'draft_ready';
+    }
+
     record.writerCatId = params.authorCatId;
     record.proposedStateDelta = parsedDelta;
     record.precheckWarnings = violations;
-    record.stage = wasPaused ? 'paused' : 'draft_ready';
     record.updatedAt = new Date().toISOString();
 
     this.store.saveBundle(project);
@@ -1270,8 +1974,16 @@ export class ChapterOrchestrator {
       chapterNo,
       title: '',
       stage: 'idle',
+      isSeedChapter: false,
       rewriteRound: 0,
       authorSeedHint: '',
+      macroDirections: [],
+      selectedMacroDirectionId: '',
+      macroFeedbackHint: '',
+      detailedOutlineOptions: [],
+      selectedDetailedOutlineId: '',
+      detailedFeedbackHint: '',
+      revisionHistory: [],
       directionOptions: [],
       versionHistory: [],
       activeSkillSlugs: [],

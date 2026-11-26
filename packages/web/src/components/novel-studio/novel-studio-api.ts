@@ -16,6 +16,7 @@ import type {
   ReferenceBookSummary,
   RetrievedBeatPassage,
   StoryArc,
+  StudioWizardStep,
   StyleReferenceConfig,
 } from '@cat-cafe/shared';
 import { apiFetch } from '@/utils/api-client';
@@ -98,22 +99,10 @@ export const novelStudioApi = {
       body: JSON.stringify(input),
     }),
 
-  embedBook: (bookId: string) =>
-    jsonRequest<{ book: ReferenceBookSummary }>(`/api/novel-studio/books/${encodeURIComponent(bookId)}/embed`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    }),
-
   deleteBook: (bookId: string) =>
     jsonRequest<{ deleted: boolean }>(`/api/novel-studio/books/${encodeURIComponent(bookId)}`, {
       method: 'DELETE',
     }),
-
-  listBookChapters: (bookId: string) =>
-    jsonRequest<{
-      book: ReferenceBookSummary;
-      chapters: Array<{ chapterIndex: number; title: string; charCount: number; summaryPreview: string }>;
-    }>(`/api/novel-studio/books/${encodeURIComponent(bookId)}/chapters`),
 
   searchPassages: (input: {
     query: string;
@@ -125,35 +114,6 @@ export const novelStudioApi = {
     jsonRequest<{ passages: RetrievedBeatPassage[] }>('/api/novel-studio/search', {
       method: 'POST',
       body: JSON.stringify(input),
-    }),
-
-  distillSkillFromBook: (
-    bookId: string,
-    input: {
-      dimension: NovelCraftDimension;
-      slug?: string;
-      title?: string;
-      customFocus?: string;
-      deepRefineThreadId?: string;
-      dissectorCatId?: string;
-    },
-  ) =>
-    jsonRequest<{
-      skill: DistilledCraftSkill;
-      loaded: { spec: DistilledCraftSkill; skillMarkdown: string; beatTemplatesMarkdown: string } | null;
-    }>(`/api/novel-studio/books/${encodeURIComponent(bookId)}/distill-skill`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
-
-  getSkillDetail: (slug: string) =>
-    jsonRequest<{ spec: DistilledCraftSkill; skillMarkdown: string; beatTemplatesMarkdown: string }>(
-      `/api/novel-studio/skills/${encodeURIComponent(slug)}`,
-    ),
-
-  deleteSkill: (slug: string) =>
-    jsonRequest<{ deleted: boolean }>(`/api/novel-studio/skills/${encodeURIComponent(slug)}`, {
-      method: 'DELETE',
     }),
 
   createProject: (input: {
@@ -180,64 +140,144 @@ export const novelStudioApi = {
       method: 'DELETE',
     }),
 
-  // ── Human-in-the-Loop Chapter Co-Pilot Endpoints ─────────────────────────
-  updateMasterOutlineAndStyle: (
-    projectId: string,
-    input: {
-      title?: string;
-      genre?: string;
-      premise?: string;
-      authorMasterOutlineMarkdown?: string;
-      styleConfig?: Partial<StyleReferenceConfig>;
-      copilotCatId?: string;
-      enableMechanicsLedger?: boolean;
-    },
-  ) =>
+  pauseProject: (projectId: string) =>
+    jsonRequest<{
+      project: NovelProject;
+      pausedChapterNos: number[];
+      cancelledCats: string[];
+      withdrawnQueueCount: number;
+      bundle: NovelProjectBundleDto;
+    }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/pause`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  // ── 0 → 7 Guided Wizard Endpoints ────────────────────────────────────────
+  setWizardStep: (projectId: string, step: StudioWizardStep) =>
     jsonRequest<{ project: NovelProject; bundle: NovelProjectBundleDto }>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/master-outline`,
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/wizard-step`,
       {
         method: 'PUT',
+        body: JSON.stringify({ step }),
+      },
+    ),
+
+  bindModuleReferences: (
+    projectId: string,
+    selections: Array<{ dimension: NovelCraftDimension; referenceBookIds: string[] }>,
+  ) =>
+    jsonRequest<{ project: NovelProject; bundle: NovelProjectBundleDto }>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/module-references`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ selections }),
+      },
+    ),
+
+  submitOnboarding: (
+    projectId: string,
+    input: {
+      rawUserSettingsInput: string;
+      rawOpeningChaptersInput: string;
+      wakeCats?: boolean;
+    },
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/onboarding`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  ideateMacroDirections: (
+    projectId: string,
+    chapterNo: number,
+    input: { feedbackHint?: string; wakeCats?: boolean } = {},
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/macro-directions`,
+      {
+        method: 'POST',
         body: JSON.stringify(input),
       },
     ),
 
-  ideateChapterDirections: (
+  ideateDetailedOutlines: (
     projectId: string,
     chapterNo: number,
-    input: {
-      authorSeedHint?: string;
-      backtrackMode?: BacktrackMode;
-      wakeCat?: boolean;
-    } = {},
+    input: { selectedDirectionId: string; feedbackHint?: string; wakeCats?: boolean },
   ) =>
-    jsonRequest<{
-      project: NovelProject;
-      chapterRecord: ChapterStateRecord;
-      bundle: NovelProjectBundleDto;
-    }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/ideate`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/detailed-outlines`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
 
-  generateChapterFromChoice: (
+  executeDraftFromOutline: (
     projectId: string,
     chapterNo: number,
-    input: {
-      selectedOptionIds?: string[];
-      customAuthorInput?: string;
-      chapterPromptNotes?: string;
-      backtrackMode?: BacktrackMode;
-      wakeCat?: boolean;
-    },
+    input: { selectedDetailedOutlineId: string; extraNote?: string; wakeCats?: boolean },
   ) =>
-    jsonRequest<{
-      project: NovelProject;
-      chapterRecord: ChapterStateRecord;
-      bundle: NovelProjectBundleDto;
-    }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/generate`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/execute-draft`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+
+  reviseChapterWithSuggestion: (
+    projectId: string,
+    chapterNo: number,
+    input: { suggestion: string; currentTextOverride?: string; wakeCats?: boolean },
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/revise`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+
+  restoreRevisionRound: (
+    projectId: string,
+    chapterNo: number,
+    round: number,
+    which: 'previous' | 'revised' = 'previous',
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/restore-revision`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ round, which }),
+      },
+    ),
+
+  humanizeChapter: (
+    projectId: string,
+    chapterNo: number,
+    input: { sourceTextOverride?: string; extraToneHint?: string; wakeCats?: boolean } = {},
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/humanize`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+
+  finalizeChapterProduct: (
+    projectId: string,
+    chapterNo: number,
+    input: { title?: string; finalText: string; advanceToNextChapter?: boolean },
+  ) =>
+    jsonRequest<NovelProjectBundleDto>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/finalize-product`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
 
   saveManualDraft: (
     projectId: string,
@@ -252,53 +292,31 @@ export const novelStudioApi = {
       },
     ),
 
-  finalizeChapter: (
-    projectId: string,
-    chapterNo: number,
-    input: {
-      title?: string;
-      finalTextOverride?: string;
-      stateDeltaOverride?: ChapterStateDelta;
-      authorNotes?: string;
-      wakeCatForDeepSummary?: boolean;
-    } = {},
-  ) =>
-    jsonRequest<NovelProjectBundleDto>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/finalize`,
-      {
-        method: 'POST',
-        body: JSON.stringify(input),
-      },
+  exportManuscript: (projectId: string, format: 'md' | 'txt') =>
+    jsonRequest<{ fileName: string; content: string }>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/export?format=${format}`,
     ),
 
-  updateChapterSummary: (
+  // Legacy compatibility exports
+  updateMasterOutlineAndStyle: (
     projectId: string,
-    chapterNo: number,
     input: {
-      summary: Omit<DistilledChapterSummary, 'chapterNo' | 'wordCount' | 'summarizedAt'>;
-      stateDelta?: ChapterStateDelta;
-      worldbuildingAdditions?: string[];
-      rollingSynopsisMarkdown?: string;
+      title?: string;
+      genre?: string;
+      premise?: string;
+      authorMasterOutlineMarkdown?: string;
+      styleConfig?: Partial<StyleReferenceConfig>;
+      copilotCatId?: string;
     },
   ) =>
-    jsonRequest<NovelProjectBundleDto>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/summary`,
+    jsonRequest<{ project: NovelProject; bundle: NovelProjectBundleDto }>(
+      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/master-outline`,
       {
         method: 'PUT',
         body: JSON.stringify(input),
       },
     ),
 
-  restoreChapterVersion: (projectId: string, chapterNo: number, versionId: string) =>
-    jsonRequest<NovelProjectBundleDto>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/restore-version`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ versionId }),
-      },
-    ),
-
-  // ── Legacy / Shared Endpoints ────────────────────────────────────────────
   updateMatrix: (projectId: string, dimensionBindings: DimensionSkillBinding[]) =>
     jsonRequest<{ project: NovelProject }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/matrix`, {
       method: 'PUT',
@@ -321,32 +339,11 @@ export const novelStudioApi = {
       worldBlueprintMarkdown?: string;
       storyArcs?: StoryArc[];
       chapterOutlines?: ChapterOutline[];
-      replaceAllChapterOutlines?: boolean;
     },
   ) =>
     jsonRequest<{ project: NovelProject }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/outlines`, {
       method: 'PUT',
       body: JSON.stringify(input),
-    }),
-
-  deleteChapterOutline: (projectId: string, chapterNo: number) =>
-    jsonRequest<{ project: NovelProject }>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/outlines/${chapterNo}`,
-      {
-        method: 'DELETE',
-      },
-    ),
-
-  pauseProject: (projectId: string) =>
-    jsonRequest<{
-      project: NovelProject;
-      pausedChapterNos: number[];
-      cancelledCats: string[];
-      withdrawnQueueCount: number;
-      bundle: NovelProjectBundleDto;
-    }>(`/api/novel-studio/projects/${encodeURIComponent(projectId)}/pause`, {
-      method: 'POST',
-      body: JSON.stringify({}),
     }),
 
   saveCanon: (projectId: string, canon: NarrativeGraph) =>
@@ -364,20 +361,11 @@ export const novelStudioApi = {
       },
     ),
 
-  requestChapterRewrite: (projectId: string, chapterNo: number, feedback: string) =>
-    jsonRequest<NovelProjectBundleDto>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/chapters/${chapterNo}/request-rewrite`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ feedback }),
-      },
-    ),
-
-  exportManuscript: (projectId: string, format: 'md' | 'txt') =>
-    jsonRequest<{ fileName: string; content: string }>(
-      `/api/novel-studio/projects/${encodeURIComponent(projectId)}/export?format=${format}`,
-    ),
-
-  // Unused dummy export to keep type imports warm if needed
-  _types: undefined as unknown as ChapterDirectionOption | undefined,
+  _keepTypes: undefined as unknown as
+    | BacktrackMode
+    | ChapterDirectionOption
+    | ChapterStateDelta
+    | ChapterStateRecord
+    | DistilledChapterSummary
+    | undefined,
 };

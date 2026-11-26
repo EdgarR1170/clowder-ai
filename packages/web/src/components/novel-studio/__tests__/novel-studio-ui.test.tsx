@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CanonAndReaderPanel } from '../CanonAndReaderPanel';
-import { ChapterCopilotPanel } from '../ChapterCopilotPanel';
 import { NovelStudioWorkbench } from '../NovelStudioWorkbench';
 import { ReferenceLibraryPanel } from '../ReferenceLibraryPanel';
+import { Step1CreateNovel, Step2SelectModuleReferences } from '../StepCreateAndReferences';
+import { StepNextChapterFunnel } from '../StepNextChapterFunnel';
+import { StepOnboardingDissection } from '../StepOnboardingDissection';
+import { Step5HumanRevision, Step6DeAiPage, Step7FinalProductEditor } from '../StepReviseHumanizeFinal';
 
 vi.mock('../novel-studio-api', () => ({
   novelStudioApi: {
@@ -18,23 +20,29 @@ vi.mock('../novel-studio-api', () => ({
       ],
     }),
     getProjectBundle: vi.fn().mockResolvedValue(null),
-    updateMasterOutlineAndStyle: vi.fn(),
-    ideateChapterDirections: vi.fn(),
-    generateChapterFromChoice: vi.fn(),
-    saveManualDraft: vi.fn(),
-    finalizeChapter: vi.fn(),
-    updateChapterSummary: vi.fn(),
-    restoreChapterVersion: vi.fn(),
+    bindModuleReferences: vi.fn(),
+    submitOnboarding: vi.fn(),
+    ideateMacroDirections: vi.fn(),
+    ideateDetailedOutlines: vi.fn(),
+    executeDraftFromOutline: vi.fn(),
+    reviseChapterWithSuggestion: vi.fn(),
+    humanizeChapter: vi.fn(),
+    finalizeChapterProduct: vi.fn(),
     pauseProject: vi.fn(),
   },
   fileToBase64: vi.fn(),
 }));
 
-describe('NovelStudioWorkbench & ChapterCopilotPanel', () => {
-  it('exports valid React functional components for the human-guided chapter co-pilot studio', () => {
+describe('NovelStudio 0-7 Simple Guided Wizard Components', () => {
+  it('exports all 0-7 step React functional components cleanly', () => {
     expect(typeof NovelStudioWorkbench).toBe('function');
-    expect(typeof ChapterCopilotPanel).toBe('function');
-    expect(typeof CanonAndReaderPanel).toBe('function');
     expect(typeof ReferenceLibraryPanel).toBe('function');
+    expect(typeof Step1CreateNovel).toBe('function');
+    expect(typeof Step2SelectModuleReferences).toBe('function');
+    expect(typeof StepOnboardingDissection).toBe('function');
+    expect(typeof StepNextChapterFunnel).toBe('function');
+    expect(typeof Step5HumanRevision).toBe('function');
+    expect(typeof Step6DeAiPage).toBe('function');
+    expect(typeof Step7FinalProductEditor).toBe('function');
   });
 });

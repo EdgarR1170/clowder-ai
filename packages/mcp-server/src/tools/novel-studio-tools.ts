@@ -1,5 +1,7 @@
 import {
+  chapterDetailedOutlineOptionSchema,
   chapterDirectionOptionSchema,
+  chapterMacroDirectionSchema,
   chapterOutlineSchema,
   chapterStateDeltaSchema,
   distilledChapterSummarySchema,
@@ -8,6 +10,7 @@ import {
   novelCraftDimensionSchema,
   pacing5AxisScoreSchema,
   prose5AxisScoreSchema,
+  settingDissectionReportSchema,
   storyArcSchema,
 } from '@cat-cafe/shared';
 import { z } from 'zod';
@@ -134,21 +137,62 @@ export function handleNovelPrecheckChapter(input: z.infer<z.ZodObject<typeof nov
   return callbackPost('/api/callbacks/novel-studio/precheck-chapter', input);
 }
 
+export const novelSubmitSettingDissectionInputSchema = {
+  projectId: z.string().min(1).max(80).describe('Target novel project ID.'),
+  report: settingDissectionReportSchema
+    .omit({ status: true, analyzedAt: true })
+    .describe(
+      'Multi-cat dissection report of user settings + first 3 chapters (worldAndRulesSummary, coreConflictAndArc, characters, plantedHooks, authorNativeStyleNotes, nextChapterBridgeAnchor).',
+    ),
+  stateDelta: chapterStateDeltaSchema
+    .optional()
+    .describe(
+      'Optional structured initial characters/locations/foreshadowings delta extracted from settings and opening chapters.',
+    ),
+};
+
+export function handleNovelSubmitSettingDissection(
+  input: z.infer<z.ZodObject<typeof novelSubmitSettingDissectionInputSchema>>,
+) {
+  return callbackPost('/api/callbacks/novel-studio/submit-dissection', input);
+}
+
 export const novelSubmitChapterDirectionsInputSchema = {
   projectId: z.string().min(1).max(80).describe('Target novel project ID.'),
   chapterNo: z.number().int().min(1).describe('Target chapter number being ideated.'),
+  macroDirections: z
+    .array(chapterMacroDirectionSchema)
+    .length(5)
+    .optional()
+    .describe('Step 4A: 5 distinct macro chapter outline directions for the user to pick from.'),
   options: z
     .array(chapterDirectionOptionSchema)
     .length(5)
-    .describe(
-      'Exactly 5 distinct plot progression options & guiding questions tailored to previous chapters, canon snapshot, and reference style.',
-    ),
+    .optional()
+    .describe('Optional legacy 5-direction option cards.'),
 };
 
 export function handleNovelSubmitChapterDirections(
   input: z.infer<z.ZodObject<typeof novelSubmitChapterDirectionsInputSchema>>,
 ) {
   return callbackPost('/api/callbacks/novel-studio/submit-directions', input);
+}
+
+export const novelSubmitDetailedOutlinesInputSchema = {
+  projectId: z.string().min(1).max(80).describe('Target novel project ID.'),
+  chapterNo: z.number().int().min(1).describe('Target chapter number.'),
+  detailedOutlines: z
+    .array(chapterDetailedOutlineOptionSchema)
+    .length(5)
+    .describe(
+      'Step 4B: 5 distinct detailed scene-beat outlines expanding the chosen macro direction, with per-beat craftDimension tags.',
+    ),
+};
+
+export function handleNovelSubmitDetailedOutlines(
+  input: z.infer<z.ZodObject<typeof novelSubmitDetailedOutlinesInputSchema>>,
+) {
+  return callbackPost('/api/callbacks/novel-studio/submit-detailed-outlines', input);
 }
 
 export const novelSubmitChapterSummaryInputSchema = {
@@ -385,16 +429,50 @@ export const novelStudioTools = [
     },
   }),
   defineTool({
+    name: 'novel_submit_setting_dissection',
+    description:
+      'Submit the multi-cat dissection analysis of user-provided novel settings and opening 3 chapters. ' +
+      'Use during Step 3 onboarding to persist extracted characters, world rules, planted hooks, author native voice notes, and next-chapter bridge anchor. ' +
+      'Not for writing chapter prose or scoring finished manuscripts. ' +
+      'Output: persisted SettingDissectionReport and initialized NarrativeGraph snapshot.',
+    inputSchema: novelSubmitSettingDissectionInputSchema,
+    handler: handleNovelSubmitSettingDissection,
+    governance: {
+      implementationExport: 'handleNovelSubmitSettingDissection',
+      action: 'update',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full'],
+      standaloneReason: novelAdmissionReason,
+    },
+  }),
+  defineTool({
     name: 'novel_submit_chapter_directions',
     description:
-      'Submit 5 distinct plot progression directions and guiding questions for the author to choose from before drafting the next chapter. ' +
-      'Use when the Co-Pilot Cat ideates pre-chapter directions based on previous chapters, Snapshot #(K-1) canon, downstream bridge constraints, and reference beats. ' +
-      'Not for submitting full chapter prose (use novel_submit_chapter_draft) or overwriting the author master outline. ' +
-      'Output: persisted 5-option direction deck on ChapterStateRecord with stage transitioned to awaiting_choice.',
+      'Submit 5 distinct macro chapter outline directions for the author to choose from before expanding detailed beats. ' +
+      'Use during Step 4A when proposing 5 high-level chapter plot directions based on dissected settings, prior chapters, and reference beats. ' +
+      'Not for submitting full chapter prose (use novel_submit_chapter_draft). ' +
+      'Output: persisted 5-direction macro outline list awaiting author selection.',
     inputSchema: novelSubmitChapterDirectionsInputSchema,
     handler: handleNovelSubmitChapterDirections,
     governance: {
       implementationExport: 'handleNovelSubmitChapterDirections',
+      action: 'update',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full'],
+      standaloneReason: novelAdmissionReason,
+    },
+  }),
+  defineTool({
+    name: 'novel_submit_detailed_outlines',
+    description:
+      'Submit 5 distinct detailed scene-beat outlines expanding the author-selected macro chapter direction. ' +
+      'Use during Step 4B after the author picks one macro direction so they can choose exact scene pacing and module choreography before drafting. ' +
+      'Not for submitting full chapter prose or macro directions. ' +
+      'Output: persisted 5 detailed scene-beat outline options awaiting author selection.',
+    inputSchema: novelSubmitDetailedOutlinesInputSchema,
+    handler: handleNovelSubmitDetailedOutlines,
+    governance: {
+      implementationExport: 'handleNovelSubmitDetailedOutlines',
       action: 'update',
       risk: { level: 'write', openWorld: false },
       runtimeProfiles: ['full'],

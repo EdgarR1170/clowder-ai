@@ -3,9 +3,89 @@ import {
   chapterQualityReportSchema,
   chapterStateDeltaSchema,
   continuityBridgeAlertSchema,
+  humanizerReportSchema,
   invariantViolationSchema,
 } from './canon-and-quality.js';
 import { novelCraftDimensionSchema } from './craft-dimensions.js';
+
+export const STUDIO_WIZARD_STEPS = [
+  'library',
+  'create',
+  'references',
+  'onboarding',
+  'generate',
+  'revise',
+  'humanize',
+  'final',
+] as const;
+
+export type StudioWizardStep = (typeof STUDIO_WIZARD_STEPS)[number];
+export const studioWizardStepSchema = z.enum(STUDIO_WIZARD_STEPS);
+
+export const settingDissectionCharacterSchema = z.object({
+  name: z.string().min(1).max(80),
+  role: z.enum(['protagonist', 'deuteragonist', 'antagonist', 'supporting', 'minor']).default('supporting'),
+  traitsAndVoice: z.string().max(400).default(''),
+  currentStatusAndGoal: z.string().max(400).default(''),
+});
+
+export type SettingDissectionCharacter = z.infer<typeof settingDissectionCharacterSchema>;
+
+export const settingDissectionReportSchema = z.object({
+  status: z.enum(['analyzing', 'ready']).default('ready'),
+  worldAndRulesSummary: z.string().max(4000).default(''),
+  coreConflictAndArc: z.string().max(2000).default(''),
+  characters: z.array(settingDissectionCharacterSchema).max(30).default([]),
+  plantedHooks: z.array(z.string().min(1).max(400)).max(20).default([]),
+  authorNativeStyleNotes: z.string().max(2000).default(''),
+  nextChapterBridgeAnchor: z.string().max(1000).default(''),
+  analyzedByCats: z.array(z.string().min(1).max(80)).max(10).default([]),
+  analyzedAt: z.string(),
+});
+
+export type SettingDissectionReport = z.infer<typeof settingDissectionReportSchema>;
+
+export const chapterMacroDirectionSchema = z.object({
+  optionId: z.string().min(1).max(40),
+  title: z.string().min(1).max(120),
+  summary: z.string().min(1).max(800),
+  conflictHighlight: z.string().max(400).default(''),
+  endingHook: z.string().max(400).default(''),
+});
+
+export type ChapterMacroDirection = z.infer<typeof chapterMacroDirectionSchema>;
+
+export const detailedSceneBeatItemSchema = z.object({
+  order: z.number().int().min(1).max(12),
+  sceneSummary: z.string().min(1).max(500),
+  craftDimension: novelCraftDimensionSchema.default('plot_arc'),
+  detailFocus: z.string().max(300).default(''),
+});
+
+export type DetailedSceneBeatItem = z.infer<typeof detailedSceneBeatItemSchema>;
+
+export const chapterDetailedOutlineOptionSchema = z.object({
+  optionId: z.string().min(1).max(40),
+  parentDirectionId: z.string().max(40).default(''),
+  title: z.string().min(1).max(120),
+  pacingNote: z.string().max(300).default(''),
+  openingConnection: z.string().max(400).default(''),
+  sceneBeats: z.array(detailedSceneBeatItemSchema).min(1).max(10),
+  endingCliffhanger: z.string().max(400).default(''),
+});
+
+export type ChapterDetailedOutlineOption = z.infer<typeof chapterDetailedOutlineOptionSchema>;
+
+export const chapterRevisionRoundSchema = z.object({
+  round: z.number().int().min(1),
+  userSuggestion: z.string().max(3000),
+  previousContent: z.string(),
+  revisedContent: z.string().default(''),
+  catId: z.string().max(80).default(''),
+  createdAt: z.string(),
+});
+
+export type ChapterRevisionRound = z.infer<typeof chapterRevisionRoundSchema>;
 
 export const styleReferenceConfigSchema = z.object({
   referenceBookIds: z.array(z.string().min(1).max(80)).max(6).default([]),
@@ -184,6 +264,12 @@ export type StoryArc = z.infer<typeof storyArcSchema>;
 
 export const CHAPTER_STAGES = [
   'idle',
+  'ideating_directions',
+  'selecting_direction',
+  'ideating_beats',
+  'selecting_beats',
+  'revising',
+  'humanized_ready',
   'ideating',
   'awaiting_choice',
   'draft_ready',
@@ -224,9 +310,18 @@ export const chapterStateRecordSchema = z.object({
   chapterNo: z.number().int().min(1),
   title: z.string().max(120).default(''),
   stage: chapterStageSchema.default('idle'),
+  isSeedChapter: z.boolean().default(false),
   rewriteRound: z.number().int().min(0).default(0),
   authorSeedHint: z.string().max(2000).default(''),
   backtrackMode: backtrackModeSchema.optional(),
+  macroDirections: z.array(chapterMacroDirectionSchema).max(5).default([]),
+  selectedMacroDirectionId: z.string().max(40).default(''),
+  macroFeedbackHint: z.string().max(2000).default(''),
+  detailedOutlineOptions: z.array(chapterDetailedOutlineOptionSchema).max(5).default([]),
+  selectedDetailedOutlineId: z.string().max(40).default(''),
+  detailedFeedbackHint: z.string().max(2000).default(''),
+  revisionHistory: z.array(chapterRevisionRoundSchema).max(30).default([]),
+  humanizerReport: humanizerReportSchema.optional(),
   directionOptions: z.array(chapterDirectionOptionSchema).max(5).default([]),
   selectedDirection: authorDirectionSelectionSchema.optional(),
   distilledSummary: distilledChapterSummarySchema.optional(),
@@ -261,6 +356,11 @@ export const novelProjectSchema = z.object({
   genre: z.string().max(80).default('玄幻/奇幻'),
   premise: z.string().max(2000).default(''),
   threadId: z.string().optional(),
+  activeWizardStep: studioWizardStepSchema.default('references'),
+  rawUserSettingsInput: z.string().default(''),
+  rawOpeningChaptersInput: z.string().default(''),
+  seedChapterCount: z.number().int().min(0).default(0),
+  dissectionReport: settingDissectionReportSchema.optional(),
   authorMasterOutlineMarkdown: z.string().default(''),
   rollingSynopsisMarkdown: z.string().default(''),
   accumulatedWorldbuildingMarkdown: z.string().default(''),
